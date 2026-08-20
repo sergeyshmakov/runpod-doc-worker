@@ -8,6 +8,7 @@ the bound that matters is on the traversal, not on the result set.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -612,6 +613,114 @@ def test_a_complete_scan_with_no_match_still_reports_absence(tmp_path, monkeypat
     monkeypatch.setenv("HF_HOME", str(tmp_path))
     config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
     debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir() is None
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+# -----------------------------------------------------------------------------
+# Choosing among cache candidates
+#
+# Four consecutive review rounds found defects in this function, all the same
+# shape: one unusable element deciding the whole answer. These pin the general
+# property rather than the individual cases.
+# -----------------------------------------------------------------------------
+
+def _hub_with(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    return hub
+
+
+def test_a_file_matching_the_glob_is_not_reported_as_a_model_dir(tmp_path, monkeypatch):
+    """A partially written cache entry with a newer mtime used to win, and the
+    function reported a regular file as the loaded model directory."""
+    from runpod_doc_worker import config
+
+    hub = _hub_with(tmp_path, monkeypatch)
+    (hub / "models--acme--parser").mkdir()
+    time.sleep(0.01)
+    (hub / "models--acme--stray").write_text("partially written", encoding="utf-8")
+    try:
+        result = debug.find_model_dir()
+        assert result is not None
+        assert Path(result).is_dir(), f"reported a non-directory: {result}"
+        assert "stray" not in result
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_a_candidate_that_cannot_be_statted_does_not_erase_the_others(tmp_path, monkeypatch):
+    """One stale entry used to take the whole answer down with it, so the first
+    successful response reported the model as absent."""
+    from runpod_doc_worker import config
+
+    hub = _hub_with(tmp_path, monkeypatch)
+    (hub / "models--acme--good" / "snapshots" / "abc").mkdir(parents=True)
+    (hub / "models--acme--gone").mkdir()
+
+    real_stat = Path.stat
+
+    def flaky(self, *args, **kwargs):
+        if self.name == "models--acme--gone":
+            raise FileNotFoundError(2, "vanished")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky)
+    try:
+        result = debug.find_model_dir()
+        assert result is not None, "one stale candidate erased a valid one"
+        assert "good" in result
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_an_unstattable_snapshot_does_not_erase_its_siblings(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = _hub_with(tmp_path, monkeypatch)
+    snaps = hub / "models--acme--parser" / "snapshots"
+    (snaps / "good").mkdir(parents=True)
+    (snaps / "gone").mkdir()
+
+    real_stat = Path.stat
+
+    def flaky(self, *args, **kwargs):
+        if self.name == "gone":
+            raise FileNotFoundError(2, "vanished")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky)
+    try:
+        assert debug.find_model_dir().endswith("good")
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_every_candidate_unusable_falls_back_to_no_answer(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = _hub_with(tmp_path, monkeypatch)
+    (hub / "models--acme--gone").mkdir()
+
+    real_stat = Path.stat
+
+    def flaky(self, *args, **kwargs):
+        if self.name.startswith("models--acme--"):
+            raise FileNotFoundError(2, "vanished")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky)
     try:
         assert debug.find_model_dir() is None
     finally:

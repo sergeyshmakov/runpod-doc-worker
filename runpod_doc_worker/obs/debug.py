@@ -14,7 +14,7 @@ from collections import deque
 from fnmatch import fnmatch
 from itertools import islice as _islice
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from runpod_doc_worker import config as _config
 
@@ -88,7 +88,11 @@ def find_model_dir() -> str | None:
         entries, hub_truncated = _scan(hub, PROBE_MAX_VISITS)
         matches = [
             Path(e.path) for e in entries
-            if any(fnmatch(e.name, glob) for glob in globs)
+            # A model is a directory. A regular file whose name matches — a
+            # partially written cache entry, say — is not a candidate, and with
+            # a newer mtime it would otherwise have been reported as the loaded
+            # model directory.
+            if _is_dir(e) and any(fnmatch(e.name, glob) for glob in globs)
         ]
         if not matches:
             # "Not here" and "not in the part we looked at" are different
@@ -103,8 +107,12 @@ def find_model_dir() -> str | None:
                 )
             return None
         # If multiple model dirs are cached, report the most recently used one
-        # — that's the one the library most likely resolved to.
-        best = max(matches, key=lambda p: p.stat().st_mtime)
+        # — that's the one the library most likely resolved to. A candidate
+        # that cannot be statted is skipped rather than raising: it is not an
+        # answer, but it must not take the others down with it.
+        best = _newest(matches)
+        if best is None:
+            return None
         snapshots = best / "snapshots"
         if snapshots.is_dir():
             # Bounded like every other listing in this module, and for a
@@ -120,9 +128,9 @@ def find_model_dir() -> str | None:
             # part that did work.
             try:
                 entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
-                snap_dirs = [Path(e.path) for e in entries if _is_dir(e)]
-                if snap_dirs:
-                    return str(max(snap_dirs, key=lambda p: p.stat().st_mtime))
+                newest = _newest(Path(e.path) for e in entries if _is_dir(e))
+                if newest is not None:
+                    return str(newest)
             except OSError:
                 pass
         return str(best)
@@ -337,6 +345,30 @@ def _is_dir(entry: Any) -> bool:
         return entry.is_dir()
     except OSError:
         return False
+
+
+def _newest(paths: Iterable[Path]) -> Path | None:
+    """The most recently modified path, skipping any that cannot be statted.
+
+    A cache entry can vanish or become unreadable between being listed and
+    being examined. Letting that raise made one stale entry decide the whole
+    answer — the function returned nothing, and a valid model directory sitting
+    beside it went unreported.
+
+    An element that cannot be read is not an answer, but it is not a failure
+    either; it is simply not a candidate. Returns None only when nothing was
+    usable.
+    """
+    best: Path | None = None
+    best_mtime: float | None = None
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if best_mtime is None or mtime > best_mtime:
+            best, best_mtime = path, mtime
+    return best
 
 
 def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] | str:
