@@ -11,6 +11,8 @@ import io
 import json
 from contextlib import redirect_stdout
 
+import pytest
+
 from runpod_doc_worker import config
 from runpod_doc_worker.obs import logging as worker_logging
 
@@ -241,3 +243,37 @@ def test_a_failing_mirror_is_not_invoked_by_its_own_failure_record(monkeypatch, 
         config.reset()
     capsys.readouterr()
     assert calls == ["hello"]
+
+
+@pytest.mark.parametrize("payload", [
+    "boom\nWARN  [worker] forged line",
+    "boom\r\nforged",
+    "boom\rforged",
+])
+def test_a_newline_in_a_text_message_cannot_forge_a_record(monkeypatch, payload):
+    """Text format promises one line per record. A message carrying a newline
+    emitted a second line that reads exactly like a genuine record."""
+    monkeypatch.setenv("LOG_FORMAT", "text")
+    out = _capture(worker_logging.info, payload)
+    assert len([ln for ln in out.splitlines() if ln.strip()]) == 1, out
+
+
+def test_a_newline_in_a_text_field_value_cannot_forge_a_record(monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "text")
+    out = _capture(worker_logging.info, "hello", detail="a\nINFO  [worker] forged")
+    assert len([ln for ln in out.splitlines() if ln.strip()]) == 1, out
+
+
+def test_the_escaped_text_still_shows_the_content(monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "text")
+    out = _capture(worker_logging.info, "line one\nline two")
+    assert "line one" in out and "line two" in out
+
+
+def test_json_format_was_already_safe(monkeypatch):
+    """json.dumps escapes control characters, so this pins existing behaviour
+    rather than changing it."""
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    out = _capture(worker_logging.info, "boom\nforged")
+    assert len([ln for ln in out.splitlines() if ln.strip()]) == 1
+    assert json.loads(out.strip())["msg"] == "boom\nforged"

@@ -87,14 +87,35 @@ def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
     return json.dumps(record, default=str)
 
 
+def _one_line(value: Any) -> str:
+    """Render ``value`` so it cannot break the record it belongs to.
+
+    The text format promises one line per record, and a message carrying a
+    newline broke that promise in a way that mattered: the trailing part
+    appeared on its own line, formatted like any other record and
+    indistinguishable from one. Exception text routinely quotes caller input,
+    so this is reachable without anyone intending it.
+
+    The json format never had the problem — `json.dumps` escapes control
+    characters — which is why this lives here rather than in `_emit`.
+    """
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
 def _format_text(level: str, msg: str, fields: dict[str, Any]) -> str:
     """Compact human-readable single-line format."""
     ts = time.strftime("%H:%M:%S")
-    parts = [f"{ts} {level.upper():<5} [{_config.active().logger_name}] {msg}"]
+    logger = _one_line(_config.active().logger_name)
+    parts = [f"{ts} {level.upper():<5} [{logger}] {_one_line(msg)}"]
     if (jid := job_id_var.get()) is not None:
-        parts.append(f"job_id={jid}")
+        parts.append(f"job_id={_one_line(jid)}")
     for k, v in _caller_fields(fields).items():
-        parts.append(f"{k}={v}")
+        parts.append(f"{_one_line(k)}={_one_line(v)}")
     return " ".join(parts)
 
 
