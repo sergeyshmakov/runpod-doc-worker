@@ -232,36 +232,58 @@ def probe_filesystem() -> dict[str, Any]:
             continue
         out["paths"][label] = _list(p)
 
-    # Hunt for any `models--*` directories regardless of casing, anywhere
-    # under /runpod-volume up to depth 4. This catches the case where
-    # RunPod populated under a different path than HF_HOME/hub.
+    # Hunt for any `models--*` directories anywhere under /runpod-volume, to
+    # catch the case where RunPod populated a different path than HF_HOME/hub.
     for search_root in ("/runpod-volume",):
         root = Path(search_root)
         if not root.is_dir():
             continue
         try:
-            for path in root.rglob("models--*"):
-                try:
-                    rel_depth = len(path.relative_to(root).parts)
-                except ValueError:
-                    continue
-                if rel_depth > 4:
-                    continue
-                snapshots = path / "snapshots"
-                snap_names: list[str] = []
-                if snapshots.is_dir():
-                    try:
-                        snap_names = [d.name for d in snapshots.iterdir() if d.is_dir()][:5]
-                    except OSError:
-                        pass
-                out["models_found"].append({
-                    "path": str(path),
-                    "depth": rel_depth,
-                    "snapshots": snap_names,
-                })
-                if len(out["models_found"]) >= 20:
-                    break
+            out["models_found"] = find_model_dirs(root)
         except (PermissionError, OSError) as e:
             out["models_found_error"] = f"{type(e).__name__}: {e}"
 
     return out
+
+
+# How far under a search root the probe will look, and how many hits it will
+# report. Both are bounds on a diagnostic that runs against a network volume of
+# unknown size while a caller waits for the response.
+PROBE_MAX_DEPTH = 4
+PROBE_MAX_MATCHES = 20
+
+
+def find_model_dirs(
+    root: Path,
+    max_depth: int = PROBE_MAX_DEPTH,
+    limit: int = PROBE_MAX_MATCHES,
+) -> list[dict[str, Any]]:
+    """Model directories under ``root``, no deeper than ``max_depth``.
+
+    Globs one level at a time rather than walking the tree and filtering after
+    the fact. `rglob` descends everything it can reach before anything gets
+    discarded, so on a large network volume the depth bound described the
+    results while the traversal stayed unbounded — and a probe that finds
+    nothing was the case that scanned the most.
+    """
+    found: list[dict[str, Any]] = []
+    for depth in range(1, max_depth + 1):
+        pattern = "/".join(["*"] * (depth - 1) + ["models--*"])
+        for path in sorted(root.glob(pattern)):
+            if not path.is_dir():
+                continue
+            snapshots = path / "snapshots"
+            snap_names: list[str] = []
+            if snapshots.is_dir():
+                try:
+                    snap_names = [d.name for d in snapshots.iterdir() if d.is_dir()][:5]
+                except OSError:
+                    pass
+            found.append({
+                "path": str(path),
+                "depth": depth,
+                "snapshots": snap_names,
+            })
+            if len(found) >= limit:
+                return found
+    return found

@@ -8,6 +8,7 @@ image → PDF) belongs to the engine, not here.
 from __future__ import annotations
 
 import base64
+import time
 from pathlib import Path
 
 import httpx
@@ -42,7 +43,16 @@ MAX_URL_FILE_MB = 200
 
 # httpx timeout for the file_url GET. Long enough for slow CDNs / large
 # files; short enough that a dead URL doesn't pin a worker indefinitely.
+#
+# This is an *inactivity* timeout — httpx restarts it on every byte received,
+# so on its own it bounds a silent server and nothing else.
 URL_FETCH_TIMEOUT_SECONDS = 120.0
+
+# Wall-clock budget for the whole fetch, which is what actually bounds a server
+# that keeps the connection alive by trickling. Generous enough that a genuinely
+# slow CDN delivering 200 MB still finishes: at this budget the floor is roughly
+# 0.7 MB/s sustained.
+MAX_URL_FETCH_SECONDS = 300.0
 
 # Magic bytes for the document formats a worker is expected to accept. This
 # reports the container the bytes are in, coarsely — enough for a caller who
@@ -168,6 +178,11 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
 
     if file_url := job_input.get("file_url"):
         max_bytes = MAX_URL_FILE_MB * 1024 * 1024
+        # httpx's timeout is an inactivity timeout: it resets on every byte
+        # that arrives. A server dripping one chunk every 119 seconds never
+        # trips it, and never approaches the size cap either, so the download
+        # is bounded by nothing. This deadline covers the whole fetch.
+        deadline = time.monotonic() + MAX_URL_FETCH_SECONDS
         # The checked transport is the client's default, and whatever the
         # environment wants proxied is mounted over it. Supplying a transport
         # is what stops httpx reading the proxy environment itself, so that
@@ -205,6 +220,13 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
                     if len(buf) > max_bytes:
                         raise ValueError(
                             f"file_url body exceeded {MAX_URL_FILE_MB} MB while streaming"
+                        )
+                    if time.monotonic() > deadline:
+                        raise ValueError(
+                            f"file_url download exceeded the "
+                            f"{MAX_URL_FETCH_SECONDS:.0f}s budget after "
+                            f"{len(buf) / 1024 / 1024:.1f} MB; the server is "
+                            f"sending too slowly to finish"
                         )
                 return bytes(buf), f"url:{file_url}"
 

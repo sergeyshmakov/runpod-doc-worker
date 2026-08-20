@@ -767,3 +767,100 @@ def test_httpx_internals_this_transport_depends_on(monkeypatch):
         f"AnyIOBackend.connect_tcp host parameter is now {host_annotation!r}; "
         f"CheckedAddressBackend passes a str"
     )
+
+
+# -----------------------------------------------------------------------------
+# A trickling server is bounded by wall clock, not just by inactivity
+# -----------------------------------------------------------------------------
+
+def test_a_slow_drip_download_hits_the_wall_clock_budget(monkeypatch):
+    """httpx's timeout resets on every byte, so a server sending one chunk just
+    inside it never trips the timeout and never approaches the size cap — the
+    download is bounded by nothing without a total budget."""
+    class _Drip:
+        def __init__(self):
+            self.headers = {}
+            self.status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            # Each chunk advances the fake clock well inside the inactivity
+            # timeout, so only the wall-clock budget can stop this.
+            for _ in range(10_000):
+                clock.advance(60.0)
+                yield b"x"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Clock:
+        def __init__(self):
+            self.now = 1000.0
+
+        def advance(self, seconds):
+            self.now += seconds
+
+        def __call__(self):
+            return self.now
+
+    clock = _Clock()
+    monkeypatch.setattr(worker_io.time, "monotonic", clock)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, *a, **k):
+            return _Drip()
+
+    monkeypatch.setattr(worker_io.httpx, "AsyncClient", _Client)
+
+    with pytest.raises(ValueError, match="exceeded the .* budget"):
+        _resolve({"file_url": "https://cdn.example.com/slow.pdf"})
+
+
+def test_a_prompt_download_is_unaffected(monkeypatch):
+    """The budget must not fire on a download that simply takes a moment."""
+    class _Fast:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"%PDF-1.4 fine"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, *a, **k):
+            return _Fast()
+
+    monkeypatch.setattr(worker_io.httpx, "AsyncClient", _Client)
+    raw, src = _resolve({"file_url": "https://cdn.example.com/quick.pdf"})
+    assert raw == b"%PDF-1.4 fine"
+    assert src == "url:https://cdn.example.com/quick.pdf"
