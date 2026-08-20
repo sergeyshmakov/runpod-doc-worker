@@ -966,3 +966,20 @@ def test_the_rejection_survives_a_configured_proxy(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
     with pytest.raises(ValueError, match="dotted-quad"):
         _resolve({"file_url": "http://2130706433/doc.pdf"})
+
+
+@pytest.mark.parametrize("payload", ["   ", "\n\n", "\t", " \r\n \t "])
+def test_a_whitespace_only_payload_is_rejected(payload):
+    """`""` is falsy and fails the source check, while `"   "` is truthy and
+    survived it, then normalised to nothing and decoded to empty bytes — a
+    successful fetch of no document. Two spellings of the same caller mistake
+    should not end differently."""
+    with pytest.raises(ValueError, match="no base64 data"):
+        _resolve({"file_b64": payload})
+
+
+def test_the_empty_and_whitespace_cases_both_refuse_to_return_bytes():
+    """Whatever the wording, neither may report a successful fetch."""
+    for payload in ("", "   "):
+        with pytest.raises(ValueError):
+            _resolve({"file_b64": payload})

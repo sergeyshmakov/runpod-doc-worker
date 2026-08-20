@@ -206,6 +206,18 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
         # encoders wrap base64 across lines, and the ceiling above already
         # assumes they do.
         compact = "".join(file_b64.split())
+        if not compact:
+            # Stripping whitespace is what makes this case possible: `""` is
+            # falsy and never reaches here, while `"   "` is truthy, survives
+            # the source check, and normalises to nothing. Strict decoding
+            # accepts an empty string, so this would have been a successful
+            # fetch of no document — two spellings of one caller mistake
+            # ending differently.
+            raise ValueError(
+                "file_b64 contains no base64 data (it is empty once whitespace "
+                "is removed); send the encoded document body, or use file_url "
+                "or volume_path"
+            )
         try:
             raw = base64.b64decode(compact, validate=True)
         except (binascii.Error, ValueError) as e:
