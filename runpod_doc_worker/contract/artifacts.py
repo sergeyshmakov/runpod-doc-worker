@@ -285,6 +285,20 @@ def resolve(
     """
     entries = validate(manifest)
     wanted = set(keys) if keys is not None else None
+    if wanted is not None:
+        # A key nobody declared used to be dropped in silence, so a typo came
+        # back as a successful response with nothing in it — which reads as
+        # "this document produced no output" rather than "you asked for
+        # something that does not exist". A worker's own schema usually catches
+        # this first; a caller composing these functions directly has nothing
+        # else to catch it.
+        unknown = wanted - {art.key for art in entries}
+        if unknown:
+            raise ValueError(
+                f"requested format(s) {', '.join(sorted(unknown))} are not in "
+                f"the manifest; it declares "
+                f"{', '.join(art.key for art in entries)}"
+            )
     return {
         art.key: art.read(output_dir, basename)
         for art in entries

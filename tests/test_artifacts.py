@@ -107,9 +107,11 @@ def test_filter_of_none_means_everything(output_dir):
     }
 
 
-def test_unknown_key_in_filter_is_ignored(output_dir):
-    out = resolve(MANIFEST, output_dir, "doc", keys=["markdown", "not_a_thing"])
-    assert out == {"markdown": "# hello\n"}
+def test_unknown_key_alongside_a_real_one_is_still_rejected(output_dir):
+    """Deliberate change of behaviour: this previously returned the real key
+    and dropped the unknown one in silence."""
+    with pytest.raises(ValueError, match="not_a_thing"):
+        resolve(MANIFEST, output_dir, "doc", keys=["markdown", "not_a_thing"])
 
 
 def test_basename_is_substituted_into_patterns(tmp_path):
@@ -373,3 +375,21 @@ def test_an_unreadable_b64map_member_is_skipped(tmp_path, capsys, monkeypatch):
     warning = json.loads(capsys.readouterr().out.strip())
     assert warning["level"] == "warning"
     assert warning["file"] == "fig1.png"
+
+
+def test_an_unknown_requested_format_is_rejected(output_dir):
+    """A typo used to produce a successful response with no artifacts in it,
+    which reads as 'this document produced nothing' rather than 'you asked for
+    a key that does not exist'."""
+    with pytest.raises(ValueError, match="markdwon"):
+        resolve(MANIFEST, output_dir, "doc", keys=["markdwon"])
+
+
+def test_the_error_names_what_is_available(output_dir):
+    with pytest.raises(ValueError, match="content_list"):
+        resolve(MANIFEST, output_dir, "doc", keys=["nope"])
+
+
+def test_a_subset_of_real_keys_is_still_fine(output_dir):
+    out = resolve(MANIFEST, output_dir, "doc", keys=["markdown"])
+    assert set(out) == {"markdown"}
