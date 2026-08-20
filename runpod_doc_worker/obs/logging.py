@@ -15,6 +15,12 @@ flips to a human-readable single-line format for local development.
 A ``job_id`` ContextVar is auto-injected into every emission, per
 RunPod's write-logs guidance ("Include the job ID or request ID in
 log entries for traceability").
+
+A worker that exports telemetry registers a second sink through
+``WorkerConfig.log_mirror``; every record written here is passed to it as
+``(level, msg, fields)`` after the stdout line. The mirror is additive and
+never authoritative — stdout is what RunPod's dashboard reads, so it goes
+first and a failing mirror cannot take a job down with it.
 """
 
 from __future__ import annotations
@@ -68,30 +74,34 @@ def _emit(level: str, msg: str, fields: dict[str, Any]) -> None:
     """Write one log line to stdout. Re-reads LOG_FORMAT each call so it
     can be flipped at runtime without restarting (mostly useful for tests).
 
-    When OTel telemetry is active, mirror the same record to the OTLP/HTTP
-    logs exporter. The stdout JSON line fires first so RunPod's dashboard
-    is never gated on the external collector being reachable. Lazy import
-    keeps the no-telemetry codepath free of OTel SDK references.
+    Then mirror the same record to the worker's second sink, if it registered
+    one. The stdout line fires first so RunPod's dashboard is never gated on an
+    external collector being reachable, and a raising mirror is swallowed for
+    the same reason — telemetry export must not be able to fail a job.
     """
     fmt = os.environ.get("LOG_FORMAT", "json").lower()
     line = _format_text(level, msg, fields) if fmt == "text" else _format_json(level, msg, fields)
     print(line, file=sys.stdout, flush=True)
 
-    # Mirror to OTel logs if enabled. The import is local so the
-    # no-telemetry path doesn't pay an import cost on every log line
-    # — the module itself is cheap to import (no OTel SDK touched
-    # until OTEL_EXPORTER_OTLP_ENDPOINT is set).
-    try:
-        from runpod_doc_worker.obs import telemetry as _telemetry  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
+    mirror = _config.active().log_mirror
+    if mirror is None:
         return
-    if _telemetry.is_enabled():
-        # Pass the job_id along as an attribute so the OTel record
-        # carries the same correlation field the stdout JSON has.
-        attrs = dict(fields)
-        if (jid := job_id_var.get()) is not None:
-            attrs.setdefault("job_id", jid)
-        _telemetry.emit_log(level, msg, attrs)
+    # Pass the job_id along as an attribute so the mirrored record carries the
+    # same correlation field the stdout line has.
+    attrs = dict(fields)
+    if (jid := job_id_var.get()) is not None:
+        attrs.setdefault("job_id", jid)
+    try:
+        mirror(level, msg, attrs)
+    except Exception as e:  # noqa: BLE001
+        # One line to stdout, which is the sink we know works. Not routed back
+        # through _emit(): a mirror that raises on every record would recurse.
+        print(
+            f"{{\"level\":\"warning\",\"logger\":\"{_config.active().logger_name}\","
+            f"\"msg\":\"log mirror raised\",\"error\":\"{type(e).__name__}\"}}",
+            file=sys.stdout,
+            flush=True,
+        )
 
 
 def info(msg: str, **fields: Any) -> None:
