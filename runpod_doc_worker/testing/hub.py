@@ -34,11 +34,15 @@ _GUIDANCE = "move long-form guidance into the docs rather than the description f
 
 
 def load(path: str | Path) -> dict[str, Any]:
-    """Parse a hub.json, asserting it exists and is an object."""
+    """Parse a hub.json, checking it exists and is an object."""
     p = Path(path)
-    assert p.is_file(), f"hub.json not found at {p}"
+    if not p.is_file():
+        raise AssertionError(f"hub.json not found at {p}")
     data = json.loads(p.read_text(encoding="utf-8"))
-    assert isinstance(data, dict), f"hub.json must be a JSON object; got {type(data).__name__}"
+    if not isinstance(data, dict):
+        raise AssertionError(
+            f"hub.json must be a JSON object; got {type(data).__name__}"
+        )
     return data
 
 
@@ -78,38 +82,52 @@ def problems(hub: dict[str, Any]) -> list[str]:
 
 
 def check(path: str | Path) -> None:
-    """Assert a hub.json at ``path`` is publishable. Raises AssertionError."""
+    """Check a hub.json at ``path`` is publishable. Raises AssertionError."""
     found = problems(load(path))
-    assert not found, "hub.json problems:\n  - " + "\n  - ".join(found)
+    if found:
+        raise AssertionError("hub.json problems:\n  - " + "\n  - ".join(found))
 
 
 def check_test_inputs(path: str | Path, roots: Iterable[str] | None = None) -> None:
-    """Assert every ``volume_path`` in a ``.runpod/tests.json`` is reachable.
+    """Check every ``volume_path`` in a ``.runpod/tests.json`` is reachable.
 
     The Hub validator runs these jobs against a release build, and a
     ``volume_path`` outside the worker's input roots is rejected there rather
     than here — an expensive place to find out. ``roots`` defaults to the
-    harness defaults; pass the worker's own when it narrows them.
+    active worker config; pass the worker's own explicitly when this runs
+    somewhere ``configure()`` has not.
 
-    Compared as POSIX paths regardless of the machine running the test: these
+    A spec with no ``tests`` key is an error, not a pass: a validator that
+    reports clean on a file that lost its contents is worse than none.
+
+    Compared as POSIX paths regardless of the machine running the check: these
     are container paths, not local ones.
     """
     from pathlib import PurePosixPath
 
-    from runpod_doc_worker.transport.io import DEFAULT_VOLUME_ROOTS
+    from runpod_doc_worker import config as _config
 
     p = Path(path)
-    assert p.is_file(), f"tests.json not found at {p}"
+    if not p.is_file():
+        raise AssertionError(f"tests.json not found at {p}")
     spec = json.loads(p.read_text(encoding="utf-8"))
-    allowed = [PurePosixPath(r) for r in (roots if roots is not None else DEFAULT_VOLUME_ROOTS)]
+    if "tests" not in spec:
+        raise AssertionError(
+            f"{p.name} has no 'tests' key — the Hub validator would run nothing"
+        )
+    allowed = [
+        PurePosixPath(r)
+        for r in (roots if roots is not None else _config.active().volume_roots)
+    ]
 
-    for case in spec.get("tests", []):
+    for case in spec["tests"]:
         volume_path = case.get("input", {}).get("volume_path")
         if not volume_path:
             continue
         target = PurePosixPath(volume_path)
-        assert any(r == target or r in target.parents for r in allowed), (
-            f"{volume_path!r} from {p.name} is outside the input roots "
-            f"({', '.join(str(r) for r in allowed)}) — the Hub validator would "
-            f"reject it"
-        )
+        if not any(r == target or r in target.parents for r in allowed):
+            raise AssertionError(
+                f"{volume_path!r} from {p.name} is outside the input roots "
+                f"({', '.join(str(r) for r in allowed)}) — the Hub validator "
+                f"would reject it"
+            )

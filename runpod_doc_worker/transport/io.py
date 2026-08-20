@@ -8,12 +8,12 @@ image → PDF) belongs to the engine, not here.
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path
 
 import httpx
 
 from runpod_doc_worker import config as _config
+from runpod_doc_worker.config import DEFAULT_VOLUME_ROOTS  # noqa: F401  (re-export)
 from runpod_doc_worker.transport import net as _net
 
 
@@ -28,7 +28,12 @@ MAX_INLINE_FILE_MB = 20
 # rejected by measuring the string we were handed instead of after allocating
 # the decoded copy of it. Base64 costs 4 characters per 3 bytes; the 5%
 # headroom absorbs padding and the line breaks some encoders insert.
-MAX_INLINE_B64_CHARS = int((MAX_INLINE_FILE_MB * 1024 * 1024) / 3 * 4 * 1.05)
+#
+# Derived at call time rather than at import, so it cannot drift from
+# MAX_INLINE_FILE_MB — a monkeypatched or (later) configurable ceiling has to
+# move both numbers together or neither.
+def _max_inline_b64_chars() -> int:
+    return int((MAX_INLINE_FILE_MB * 1024 * 1024) / 3 * 4 * 1.05)
 
 # Cap on file_url downloads. Larger than MAX_INLINE_FILE_MB because URL
 # fetches aren't constrained by RunPod's gateway, but still bounded so a
@@ -39,26 +44,11 @@ MAX_URL_FILE_MB = 200
 # files; short enough that a dead URL doesn't pin a worker indefinitely.
 URL_FETCH_TIMEOUT_SECONDS = 120.0
 
-# Directories a `volume_path` input is expected to live under. The defaults
-# cover the places a document can actually come from on a deployed worker:
-# the network-volume mount (`/runpod-volume`, or `/workspace` when the
-# operator mounts it there), files baked into the image (the Hub validator's
-# fixture is at `/worker/test-fixture.pdf`), and the per-job temp tree.
-# Operators who pre-stage a corpus somewhere else — or who want to narrow the
-# worker to one subtree — set <PREFIX>_VOLUME_ROOTS to a comma-separated list of
-# absolute paths, which replaces this list.
-DEFAULT_VOLUME_ROOTS: tuple[str, ...] = (
-    "/runpod-volume",
-    "/workspace",
-    "/worker",
-    "/tmp",
-)
-
-
-# Magic bytes for the document formats a worker is expected to accept. The
-# engine decides what it can actually do with each one; this only reports what
-# the bytes are, so a mis-encoded payload fails with a useful message instead
-# of deep inside a parser.
+# Magic bytes for the document formats a worker is expected to accept. This
+# reports the container the bytes are in, coarsely — enough for a caller who
+# base64'd the wrong thing to get a useful message instead of a failure deep
+# inside a parser. It is not a content sniffer, and the labels are broader than
+# the names suggest: see `detect_format`.
 _IMAGE_MAGIC = (
     b"\x89PNG\r\n\x1a\n",   # PNG
     b"\xff\xd8\xff",        # JPEG
@@ -66,24 +56,39 @@ _IMAGE_MAGIC = (
     b"BM",                  # BMP
     b"II*\x00",             # TIFF little-endian
     b"MM\x00*",             # TIFF big-endian
-    b"RIFF",                # WebP container (also AVI / WAV — rare as PDF inputs)
 )
 _PDF_MAGIC = b"%PDF"
-_ZIP_MAGIC = b"PK\x03\x04"  # DOCX / PPTX / XLSX (all OOXML) and ZIP itself
+_ZIP_MAGIC = b"PK\x03\x04"
+
+# RIFF is a container, not a format: WebP, WAV and AVI all open with it. Only
+# the ones whose fourcc says WEBP are images, so the fourcc is checked rather
+# than trusting the container magic — otherwise a WAV file is reported as an
+# image and the engine finds out the hard way.
+_RIFF_MAGIC = b"RIFF"
+_WEBP_FOURCC = b"WEBP"
 
 
 def detect_format(file_bytes: bytes) -> str:
     """Return one of: "pdf" | "image" | "ooxml" | "unknown".
 
-    OOXML (DOCX/PPTX/XLSX) all start with the ZIP magic, and telling them apart
-    means inspecting the archive's content-types. We just flag "ooxml" and let
-    the engine decide which of the three it is.
+    The labels are coarse on purpose, and two of them are broader than they
+    read:
+
+    * ``"image"`` covers PNG, JPEG, GIF, BMP, TIFF and WebP.
+    * ``"ooxml"`` means "a ZIP container" — DOCX, PPTX and XLSX all start with
+      the ZIP magic, and so do EPUB, ODT and JAR. Telling them apart means
+      reading the archive's content-types, which is the engine's job; this
+      only says the bytes are a ZIP, not that they are Office XML.
+
+    An engine that cannot accept everything a label covers rejects it itself.
     """
     if not file_bytes:
         return "unknown"
     if file_bytes.startswith(_PDF_MAGIC):
         return "pdf"
     if any(file_bytes.startswith(m) for m in _IMAGE_MAGIC):
+        return "image"
+    if file_bytes.startswith(_RIFF_MAGIC) and file_bytes[8:12] == _WEBP_FOURCC:
         return "image"
     if file_bytes.startswith(_ZIP_MAGIC):
         return "ooxml"
@@ -93,13 +98,14 @@ def detect_format(file_bytes: bytes) -> str:
 def volume_roots() -> list[Path]:
     """Return the directories a `volume_path` may resolve inside.
 
-    ``<PREFIX>_VOLUME_ROOTS`` (comma-separated absolute paths) replaces
-    DEFAULT_VOLUME_ROOTS when set; blank entries are ignored so a trailing
-    comma or an accidentally-empty value falls back to the defaults.
+    ``<PREFIX>_VOLUME_ROOTS`` (comma-separated absolute paths) replaces the
+    worker's configured roots when set; blank entries are ignored so a trailing
+    comma or an accidentally-empty value falls back to the configured list.
     """
-    raw = _config.active().env("VOLUME_ROOTS")
+    cfg = _config.active()
+    raw = cfg.env("VOLUME_ROOTS")
     entries = [e.strip() for e in raw.split(",") if e.strip()]
-    return [Path(e) for e in (entries or DEFAULT_VOLUME_ROOTS)]
+    return [Path(e) for e in (entries or cfg.volume_roots)]
 
 
 def resolve_volume_file(volume_path: str) -> Path:
@@ -129,7 +135,9 @@ def resolve_volume_file(volume_path: str) -> Path:
     else:
         raise ValueError(
             f"volume_path is outside the configured input roots "
-            f"({', '.join(str(r) for r in roots)}): {volume_path}"
+            f"({', '.join(str(r) for r in roots)}): {volume_path} "
+            f"(set {_config.active().env_name('VOLUME_ROOTS')} to a "
+            f"comma-separated list of absolute paths to change them)"
         )
 
     if not resolved.is_file():
@@ -201,7 +209,7 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
                 return bytes(buf), f"url:{file_url}"
 
     if file_b64 := job_input.get("file_b64"):
-        if len(file_b64) > MAX_INLINE_B64_CHARS:
+        if len(file_b64) > _max_inline_b64_chars():
             raise ValueError(
                 f"inline file too large (encoded length {len(file_b64)} chars); "
                 f"use file_url or volume_path for files > {MAX_INLINE_FILE_MB} MB"

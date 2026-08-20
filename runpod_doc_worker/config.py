@@ -1,15 +1,17 @@
 """Per-worker configuration: the few values the harness cannot know itself.
 
-Everything in this package is engine-agnostic, but three things still vary by
-worker and cannot be derived: what its operator-facing env vars are called, what
-its model weights are called on disk, and which extra env vars belong in the
-probe dump. Those live here, set once at boot by the worker's entry point:
+Everything in this package is engine-agnostic, but some things still vary by
+worker and cannot be derived: what its operator-facing env vars are called,
+where its inputs are allowed to come from, what its model weights are called on
+disk, and which extra env vars belong in the probe dump. Those live here, set
+once at boot by the worker's entry point:
 
     from runpod_doc_worker import config
 
     config.configure(config.WorkerConfig(
         env_prefix="ACME",
         logger_name="acme-worker",
+        volume_roots=DEFAULT_VOLUME_ROOTS + ("/opt/acme",),
         model_globs=("models--acme--parser*",),
         probe_model_ids=("acme/parser-1.0",),
         probe_env_keys=("ACME_MODEL_SOURCE",),
@@ -32,9 +34,25 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 _TRUTHY = ("1", "true", "yes", "on")
+
+
+# Directories a ``volume_path`` input may resolve under, before a worker says
+# otherwise. These are places any RunPod worker can receive a file: the
+# network-volume mount (``/runpod-volume``, or ``/workspace`` when an operator
+# mounts it there) and the per-job temp tree.
+#
+# A path baked into a particular image — a fixture next to the handler, a
+# pre-staged corpus — is that worker's own business and belongs in its
+# ``volume_roots``, not here. See :class:`WorkerConfig`.
+DEFAULT_VOLUME_ROOTS: tuple[str, ...] = (
+    "/runpod-volume",
+    "/workspace",
+    "/tmp",
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +64,9 @@ class WorkerConfig:
         ``ACME_ALLOW_LOCAL_FETCH``.
     :param logger_name: Value of the ``logger`` field on every structured log
         record, and the bracketed tag in text format.
+    :param volume_roots: Directories a ``volume_path`` input may resolve under.
+        A worker whose image bakes files somewhere adds that directory here;
+        ``<PREFIX>_VOLUME_ROOTS`` still overrides the whole list at runtime.
     :param model_globs: Glob patterns matched against ``$HF_HOME/hub`` by
         :func:`runpod_doc_worker.obs.debug.find_model_dir` to report which
         weights a worker actually loaded. Empty means "do not look".
@@ -53,13 +74,19 @@ class WorkerConfig:
         snapshot paths for, to diagnose a cache that is present but unreadable.
     :param probe_env_keys: Extra env var names to include in the probe's env
         dump, on top of the HuggingFace ones every worker shares.
+    :param log_mirror: Optional second sink for log records, called as
+        ``(level, msg, fields)`` after the stdout line is written. A worker with
+        its own telemetry export registers it here; see
+        :mod:`runpod_doc_worker.obs.logging`.
     """
 
     env_prefix: str = "WORKER"
     logger_name: str = "worker"
+    volume_roots: tuple[str, ...] = DEFAULT_VOLUME_ROOTS
     model_globs: tuple[str, ...] = ()
     probe_model_ids: tuple[str, ...] = ()
     probe_env_keys: tuple[str, ...] = field(default=())
+    log_mirror: Callable[[str, str, dict], None] | None = None
 
     def env_name(self, name: str) -> str:
         """Full env var name for ``name``, for reads and for error messages."""

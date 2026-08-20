@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from pathlib import Path
 
 import pytest
 
@@ -32,11 +31,13 @@ def test_volume_roots_default_when_env_unset(monkeypatch):
     ]
 
 
-def test_default_roots_cover_the_documented_locations():
-    """Each default root is promised by the network-volumes guide, so dropping
-    one is a contract change rather than a tidy-up."""
-    assert set(worker_io.DEFAULT_VOLUME_ROOTS) >= {
-        "/runpod-volume", "/workspace", "/worker", "/tmp",
+def test_default_roots_cover_the_places_any_worker_receives_a_file():
+    """The network-volume mount, wherever an operator mounted it, and the
+    per-job temp tree. Dropping one is a contract change rather than a
+    tidy-up. A path that exists because some image put it there is not here —
+    that belongs in a worker's own `volume_roots`."""
+    assert set(worker_io.DEFAULT_VOLUME_ROOTS) == {
+        "/runpod-volume", "/workspace", "/tmp",
     }
 
 
