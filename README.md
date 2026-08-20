@@ -10,21 +10,24 @@ emitting logs RunPod's viewer can filter; answering a probe job when the model
 cache is not where it should be. This package is that half, so a worker repo can
 be the engine and the entry point.
 
-**Status: pre-release.** The package installs and the transport layer is
-covered, but there is no handler in it yet — the job envelope, the stage
-pipeline and the worker bootstrap land in following releases. Nothing depends on
-this yet; the API is expected to move.
+**Status: pre-release.** The package installs and its input transport, target
+checks, packaging and artifact manifest are covered by tests, but there is no
+handler in it yet — the job envelope, the stage pipeline and the worker
+bootstrap land in following releases. Nothing depends on this yet; the API is
+expected to move.
 
 ## Install
 
-Pin a tag rather than a branch. No `git` binary is needed on the build node:
+Pin a tag rather than a branch. No `git` binary is needed on the build node.
+In a `requirements.txt`, use the PEP 508 direct-reference form so extras come
+with it — a bare URL cannot carry them:
 
 ```
-https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.1.0.tar.gz
+runpod-doc-worker[s3] @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.1.0.tar.gz
 ```
 
-Extras: `s3` for the S3 transport, `otel` for telemetry export, `test` for the
-suite.
+Extras: `s3` for the S3 transport (boto3), `test` for the suite. Drop the
+`[s3]` if the worker only returns tarballs or inline payloads.
 
 ## What a worker declares
 
@@ -32,11 +35,13 @@ Two things, both data:
 
 ```python
 from runpod_doc_worker import config
+from runpod_doc_worker.config import DEFAULT_VOLUME_ROOTS
 from runpod_doc_worker.contract.artifacts import Artifact
 
 config.configure(config.WorkerConfig(
     env_prefix="ACME",              # ACME_ALLOW_LOCAL_FETCH, ACME_VOLUME_ROOTS, ...
     logger_name="acme-worker",
+    volume_roots=DEFAULT_VOLUME_ROOTS + ("/worker",),   # where this image bakes files
     model_globs=("models--acme--parser*",),
 ))
 
@@ -55,6 +60,7 @@ because the prefix comes from the worker rather than from here.
 
 | Module | What it does |
 |---|---|
+| `config` | the handful of values a worker declares about itself |
 | `transport.io` | fetch bytes from url / b64 / volume, detect format |
 | `transport.net` | resolve and check outbound targets, connect only to checked addresses |
 | `transport.package` | tarball / inline / s3 responses, presigned URLs |

@@ -60,7 +60,7 @@ Types that **trigger a release**:
 
 Types that **do not** trigger a release: `docs:` (except `docs(readme):`, a patch), `test:`, `build:`, `ci:`, `chore:`, `style:`.
 
-**Do not use `!` or a `BREAKING CHANGE:` footer.** While the package is pre-1.0, major bumps are made deliberately by the maintainer rather than derived from a commit. A change that breaks a consumer is still a `feat:` or `refactor:` — describe the break in the body.
+**Do not use `!` or a `BREAKING CHANGE:` footer.** While the package is pre-1.0, major bumps are made deliberately by the maintainer rather than derived from a commit. A change that breaks a consumer is still a `feat:` or `refactor:` — describe the break in the body. `.releaserc.json` maps `breaking` to a **minor** bump rather than leaving the rule out, because commit-analyzer falls back to a default that would take the package to 1.0.0 on one commit.
 
 Commitlint runs on every PR. Preview locally with `npx commitlint --from HEAD~1 --to HEAD --verbose`.
 

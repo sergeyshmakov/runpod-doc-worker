@@ -6,6 +6,7 @@
       "@semantic-release/commit-analyzer",
       {
         "preset": "conventionalcommits",
+        "//": "breaking->minor is deliberate: while the package is pre-1.0 the maintainer decides major bumps, not a commit footer. Leaving the rule out does not work — commit-analyzer falls back to DEFAULT_RELEASE_RULES, which maps breaking to major.",
         "releaseRules": [
           { "type": "perf",     "release": "patch" },
           { "type": "refactor", "release": "patch" },
@@ -15,7 +16,7 @@
           { "type": "test",     "release": false },
           { "type": "chore",    "release": false },
           { "type": "style",    "release": false },
-          { "breaking": true,   "release": "major" }
+          { "breaking": true,   "release": "minor" }
         ]
       }
     ],
