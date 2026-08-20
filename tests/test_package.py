@@ -260,3 +260,58 @@ def test_a_one_shot_manifest_is_still_checked_for_reserved_keys(output_dir):
             transport="inline", formats=None, output_dir=output_dir,
             basename="doc", source="url:real", manifest=bad,
         )
+
+
+# -----------------------------------------------------------------------------
+# An archive carries the engine's output, and nothing the output points at
+# -----------------------------------------------------------------------------
+
+@pytest.fixture
+def symlinked_output(tmp_path):
+    """An output dir containing a symlink to a file outside it."""
+    secret = tmp_path / "outside" / "credentials.txt"
+    secret.parent.mkdir()
+    secret.write_text("SECRET VALUE", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "doc.md").write_bytes(b"# hello\n")
+    try:
+        (out / "leak.txt").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    return out
+
+
+def test_zip_does_not_carry_a_symlinked_file_from_outside(symlinked_output):
+    """`is_file()` follows the link and `zf.write()` archives the target's
+    bytes, so the response would carry a file the engine never produced."""
+    raw = base64.b64decode(package.package_tarball(symlinked_output, "zip"))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = set(zf.namelist())
+        assert "doc.md" in names
+        assert "leak.txt" not in names
+        for name in names:
+            assert b"SECRET VALUE" not in zf.read(name)
+
+
+def test_tar_does_not_carry_a_symlink_escaping_the_output(symlinked_output):
+    raw = base64.b64decode(package.package_tarball(symlinked_output))
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        names = {m.name for m in tar.getmembers()}
+        assert "doc.md" in names
+        assert "leak.txt" not in names
+
+
+def test_a_symlink_staying_inside_the_output_is_kept(tmp_path):
+    """Only an escape is refused; an engine linking within its own output is
+    describing its own layout."""
+    out = tmp_path / "out"
+    (out / "images").mkdir(parents=True)
+    (out / "images" / "fig1.png").write_bytes(b"real")
+    try:
+        (out / "cover.png").symlink_to(out / "images" / "fig1.png")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    raw = base64.b64decode(package.package_tarball(out, "zip"))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        assert zf.read("cover.png") == b"real"

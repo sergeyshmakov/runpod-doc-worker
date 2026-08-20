@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from runpod_doc_worker.contract import artifacts as _artifacts
+from runpod_doc_worker.obs import logging as _logging
 
 
 # The ways output can be returned. A worker's own schema is what rejects a bad
@@ -49,12 +50,51 @@ def _refuse_reserved(what: str, keys: set[str]) -> None:
         )
 
 
+def _escapes(output_dir: Path, candidate: Path) -> bool:
+    """Whether ``candidate`` leads outside ``output_dir`` once links are followed.
+
+    An archive is supposed to carry what the engine produced. A symlink in the
+    output pointing elsewhere makes it carry something else instead — the zip
+    builder follows links and stores the target's bytes, so a link to a
+    credential file or another job's artifact would be handed to the caller
+    inside a normal-looking response.
+    """
+    try:
+        root = output_dir.resolve()
+        target = candidate.resolve()
+    except OSError:
+        return True
+    return not (target == root or root in target.parents)
+
+
+def _archive_members(output_dir: Path) -> list[Path]:
+    """Regular files under ``output_dir`` that stay inside it, in a stable order.
+
+    An entry that escapes is skipped rather than raised on: it is an artefact
+    of how the engine laid out its own directory, and dropping a job over it
+    would be a worse trade than shipping the rest with a line saying what was
+    left out.
+    """
+    kept: list[Path] = []
+    for child in sorted(output_dir.rglob("*")):
+        if not child.is_file():
+            continue
+        if _escapes(output_dir, child):
+            _logging.warning(
+                "archive member points outside the output directory; skipping it",
+                file=child.name,
+            )
+            continue
+        kept.append(child)
+    return kept
+
+
 def _build_tarball_bytes(output_dir: Path) -> bytes:
     """Gzip-tar the engine output dir; returns the raw bytes."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for child in sorted(output_dir.iterdir()):
-            tar.add(child, arcname=child.name, recursive=True)
+        for child in _archive_members(output_dir):
+            tar.add(child, arcname=child.relative_to(output_dir).as_posix())
     return buf.getvalue()
 
 
@@ -64,18 +104,15 @@ def _build_zip_bytes(output_dir: Path) -> bytes:
     Used when a caller requests ``archive_format="zip"``, which is what a
     client emulating an upstream REST API needs when that API returns a `.zip`.
 
-    Carries the same *files* as `_build_tarball_bytes` but not the same
-    entries: this walks `rglob("*")` filtered to regular files, so directories
-    get no member of their own and a symlink is stored as the bytes it points
-    at. The tar path adds directory members and stores symlinks as links. Both
-    extract to the same tree of files; only an extractor that inspects entry
-    types can tell them apart.
+    Carries exactly the members `_build_tarball_bytes` does — both take their
+    file list from `_archive_members`, so the two containers hold the same
+    files under the same names, and neither carries a link out of the output
+    directory.
     """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for child in sorted(output_dir.rglob("*")):
-            if child.is_file():
-                zf.write(child, arcname=child.relative_to(output_dir).as_posix())
+        for child in _archive_members(output_dir):
+            zf.write(child, arcname=child.relative_to(output_dir).as_posix())
     return buf.getvalue()
 
 
