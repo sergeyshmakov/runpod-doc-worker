@@ -169,22 +169,7 @@ def probe_filesystem() -> dict[str, Any]:
 
     Safe to call without the engine installed. Read-only. No network.
     """
-    def _list(p: Path, max_entries: int = 50) -> list[str] | str:
-        try:
-            entries = sorted(p.iterdir())
-        except (PermissionError, FileNotFoundError) as e:
-            return f"<error: {type(e).__name__}: {e}>"
-        result: list[str] = []
-        for entry in entries[:max_entries]:
-            kind = "d" if entry.is_dir() else "f"
-            try:
-                size = entry.stat().st_size if entry.is_file() else "-"
-            except OSError:
-                size = "?"
-            result.append(f"{kind} {entry.name} {size}")
-        if len(entries) > max_entries:
-            result.append(f"... ({len(entries) - max_entries} more entries elided)")
-        return result
+    _list = list_directory
 
     hf_home = os.environ.get("HF_HOME", "")
     hub_path = Path(hf_home) / "hub" if hf_home else None
@@ -247,11 +232,46 @@ def probe_filesystem() -> dict[str, Any]:
     return out
 
 
-# How far under a search root the probe will look, and how many hits it will
-# report. Both are bounds on a diagnostic that runs against a network volume of
-# unknown size while a caller waits for the response.
+# How far under a search root the probe will look, how many hits it will
+# report, and how much of any one directory it will list. All three are bounds
+# on a diagnostic that runs against a network volume of unknown size while a
+# caller waits for the response.
 PROBE_MAX_DEPTH = 4
 PROBE_MAX_MATCHES = 20
+PROBE_MAX_ENTRIES = 50
+
+
+def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] | str:
+    """A bounded listing of one directory, for the probe payload.
+
+    Enumeration stops at the limit rather than being trimmed to it. Sorting the
+    directory first would mean materialising every entry in it before the cap
+    applied — on a network volume holding hundreds of thousands of files, the
+    bound would describe the response while the work stayed unbounded.
+
+    The costs are stated rather than hidden: entries are sorted only within the
+    slice that was read, so with more than ``max_entries`` present the listing
+    is the filesystem's order, and the tail is reported as "more entries"
+    without a count, because counting them is the walk being avoided.
+    """
+    try:
+        # One extra tells us something was left behind without enumerating it.
+        entries = list(_islice(p.iterdir(), max_entries + 1))
+    except (PermissionError, FileNotFoundError, OSError) as e:
+        return f"<error: {type(e).__name__}: {e}>"
+
+    truncated = len(entries) > max_entries
+    result: list[str] = []
+    for entry in sorted(entries[:max_entries]):
+        kind = "d" if entry.is_dir() else "f"
+        try:
+            size = entry.stat().st_size if entry.is_file() else "-"
+        except OSError:
+            size = "?"
+        result.append(f"{kind} {entry.name} {size}")
+    if truncated:
+        result.append(f"... (more entries elided; listing stops at {max_entries})")
+    return result
 
 
 def find_model_dirs(

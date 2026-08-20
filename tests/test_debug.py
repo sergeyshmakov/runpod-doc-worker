@@ -127,3 +127,47 @@ def test_the_limit_stops_enumeration_rather_than_trimming_the_result(volume, mon
 
     assert len(found) == 5
     assert consumed < 50, f"enumerated {consumed} entries to return 5"
+
+
+# -----------------------------------------------------------------------------
+# The probe's directory listing
+# -----------------------------------------------------------------------------
+
+def test_a_small_directory_lists_in_sorted_order(tmp_path):
+    (tmp_path / "b.txt").write_bytes(b"xx")
+    (tmp_path / "a.txt").write_bytes(b"x")
+    (tmp_path / "sub").mkdir()
+    assert debug.list_directory(tmp_path) == ["f a.txt 1", "f b.txt 2", "d sub -"]
+
+
+def test_a_large_directory_is_truncated_with_a_marker(tmp_path):
+    for i in range(120):
+        (tmp_path / f"f{i:03d}.txt").write_bytes(b"x")
+    listed = debug.list_directory(tmp_path, max_entries=10)
+    assert len(listed) == 11
+    assert listed[-1].startswith("... (more entries elided")
+
+
+def test_the_listing_stops_enumerating_at_the_limit(tmp_path, monkeypatch):
+    """`sorted(p.iterdir())` materialised the whole directory before the slice,
+    so the cap bounded the response while the walk stayed unbounded."""
+    for i in range(500):
+        (tmp_path / f"f{i:03d}.txt").write_bytes(b"x")
+
+    consumed = 0
+    real_iterdir = Path.iterdir
+
+    def counting_iterdir(self):
+        nonlocal consumed
+        for item in real_iterdir(self):
+            consumed += 1
+            yield item
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+    debug.list_directory(tmp_path, max_entries=10)
+    assert consumed <= 11, f"enumerated {consumed} entries to list 10"
+
+
+def test_an_unreadable_directory_reports_rather_than_raising(tmp_path):
+    """Probe helpers are best-effort; nothing here may raise into the request."""
+    assert debug.list_directory(tmp_path / "absent").startswith("<error:")
