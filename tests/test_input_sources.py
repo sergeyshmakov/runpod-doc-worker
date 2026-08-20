@@ -983,3 +983,34 @@ def test_the_empty_and_whitespace_cases_both_refuse_to_return_bytes():
     for payload in ("", "   "):
         with pytest.raises(ValueError):
             _resolve({"file_b64": payload})
+
+
+@pytest.mark.parametrize("addr", [
+    "224.0.0.1",        # all-hosts
+    "239.255.255.250",  # SSDP
+    "ff02::1",          # IPv6 all-nodes
+    "ff05::c",          # IPv6 site-local
+])
+def test_multicast_answers_are_not_routable(addr):
+    """`is_global` reports multicast as global, and it was the one category
+    this predicate got wrong — an audit of every other class (broadcast,
+    unspecified, reserved, documentation, CGNAT, loopback, private) found them
+    already rejected."""
+    assert worker_net._is_routable(addr) is False
+
+
+@pytest.mark.parametrize("addr", ["93.184.216.34", "2606:4700:4700::1111"])
+def test_ordinary_public_addresses_stay_routable(addr):
+    assert worker_net._is_routable(addr) is True
+
+
+def test_a_multicast_literal_is_refused_end_to_end(monkeypatch):
+    monkeypatch.delenv("WORKER_ALLOW_LOCAL_FETCH", raising=False)
+    _stub_resolver(monkeypatch, {"mcast.example": ["224.0.0.1"]})
+    with pytest.raises(ValueError, match="publicly routable"):
+        worker_net.check_target("http://mcast.example/r.pdf", field="file_url")
+
+
+def test_a_mapped_multicast_answer_is_also_refused():
+    """The mapped form must be judged the same as the address it wraps."""
+    assert worker_net._is_routable("::ffff:224.0.0.1") is False

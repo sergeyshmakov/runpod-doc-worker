@@ -129,6 +129,14 @@ def _is_routable(addr: str) -> bool:
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped
+    # `is_global` reports multicast as global, in both families and on every
+    # supported version, so a document URL naming 224.0.0.1 or ff02::1 passed a
+    # check that advertises publicly-routable. It is the only category it gets
+    # wrong: broadcast, unspecified, reserved, documentation, shared-CGNAT,
+    # loopback and private are all already excluded, which is why this is one
+    # extra clause rather than a rewritten predicate.
+    if ip.is_multicast:
+        return False
     return ip.is_global
 
 
