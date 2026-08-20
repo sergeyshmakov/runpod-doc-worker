@@ -85,12 +85,22 @@ def find_model_dir() -> str | None:
         # was chosen, which on a shared volume is a large read on the first
         # job's response path. Patterns are matched against entry names, so a
         # model glob is a name pattern rather than a path pattern.
-        entries, _ = _scan(hub, PROBE_MAX_VISITS)
+        entries, hub_truncated = _scan(hub, PROBE_MAX_VISITS)
         matches = [
             Path(e.path) for e in entries
             if any(fnmatch(e.name, glob) for glob in globs)
         ]
         if not matches:
+            # "Not here" and "not in the part we looked at" are different
+            # answers, and the bound above makes the second one possible. A
+            # cache large enough to truncate is exactly the one where a
+            # definitive-sounding miss would send someone looking in the wrong
+            # place — which is the whole failure this field exists to prevent.
+            if hub_truncated:
+                return (
+                    f"<not found in the first {PROBE_MAX_VISITS} entries of "
+                    f"{hub}; scan truncated>"
+                )
             return None
         # If multiple model dirs are cached, report the most recently used one
         # — that's the one the library most likely resolved to.

@@ -576,3 +576,44 @@ def test_model_globs_still_match_by_name(tmp_path, monkeypatch):
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
+
+
+def test_a_truncated_hub_scan_is_not_reported_as_absence(tmp_path, monkeypatch):
+    """`_scan` reports truncation and the caller discarded it, so a cache too
+    large to scan fully reported the model as missing rather than as not-found-
+    in-the-part-we-looked-at. Same defect as the sibling search had, one
+    function over."""
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    for i in range(50):
+        (hub / f"models--other--m{i:03d}").mkdir()
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.setattr(debug, "PROBE_MAX_VISITS", 10)
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        result = debug.find_model_dir()
+        assert result is not None, "a truncated scan reported a definitive miss"
+        assert "truncated" in result or "partial" in result, result
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_a_complete_scan_with_no_match_still_reports_absence(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "models--other--thing").mkdir()
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir() is None
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
