@@ -17,23 +17,36 @@ as data rather than as branches in the packaging code:
     )
 
 Patterns are globs relative to the output directory and are formatted with the
-job's ``basename``. For ``text`` and ``json`` the first pattern that matches a
-file wins, which is how an engine expresses "the new name, or the old one if
-that is what this version wrote". For ``b64map`` every match across every
-pattern is collected, keyed by filename.
+job's ``basename``, which is escaped before substitution — a basename is data,
+so a document called ``report[2024]`` resolves to the file of that name rather
+than to a character class. Wildcards the engine writes into the pattern itself
+still work.
+
+For ``text`` and ``json`` the first pattern that matches wins, which is how an
+engine expresses "the new name, or the old one if that is what this version
+wrote". Matching more than one file for those kinds is an error rather than a
+silent truncation. For ``b64map`` every match across every pattern is
+collected, keyed by filename, and a name that appears twice is an error too.
 
 An artifact whose patterns match nothing yields its ``default`` rather than
 being dropped, so a caller reading ``response["results"][0]["markdown"]`` gets
-an empty string instead of a KeyError when a page produced no text.
+an empty string instead of a KeyError when a page produced no text. Each call
+gets its own copy of that default: a response is a mutable thing handed to a
+caller, and a worker process serves many jobs.
 """
 
 from __future__ import annotations
 
 import base64
+import copy
+import glob as _glob
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+from runpod_doc_worker.obs import logging as _logging
 
 
 TEXT = "text"
@@ -42,14 +55,19 @@ B64MAP = "b64map"
 
 VALID_KINDS = (TEXT, JSON, B64MAP)
 
+# Kinds that name one file. Everything else collects.
+_SINGLE_VALUE_KINDS = (TEXT, JSON)
+
 # Distinguishes "no default given, derive one from the kind" from a default of
 # None, which an engine is allowed to want.
 _UNSET = object()
 
+# Factories, not values — see the module docstring on why a shared container
+# would be a bug rather than an optimisation.
 _DERIVED_DEFAULTS: dict[str, Any] = {
-    TEXT: "",
-    JSON: {},
-    B64MAP: {},
+    TEXT: str,
+    JSON: dict,
+    B64MAP: dict,
 }
 
 
@@ -62,7 +80,7 @@ class Artifact:
         ``basename``. Order matters for ``text`` and ``json``.
     :param kind: ``text``, ``json`` or ``b64map``.
     :param default: Value when nothing matches. Derived from ``kind`` when not
-        given: ``""`` for text, ``{}`` for json and b64map.
+        given: ``""`` for text, ``{}`` for json and b64map. Copied per read.
     """
 
     key: str
@@ -71,59 +89,128 @@ class Artifact:
     default: Any = _UNSET
 
     def __post_init__(self) -> None:
+        if not self.key or not isinstance(self.key, str):
+            raise ValueError(f"artifact key must be a non-empty string; got {self.key!r}")
         if self.kind not in VALID_KINDS:
             raise ValueError(
                 f"artifact {self.key!r}: kind must be one of {list(VALID_KINDS)}; "
                 f"got {self.kind!r}"
             )
+        if isinstance(self.patterns, str):
+            # A bare string is iterable, so this would otherwise be accepted and
+            # then fail deep in packaging with a format-string error.
+            raise ValueError(
+                f"artifact {self.key!r}: patterns must be a tuple of strings, "
+                f"not a bare string — did you mean ({self.patterns!r},)?"
+            )
         if not self.patterns:
             raise ValueError(f"artifact {self.key!r}: at least one pattern is required")
+        for pattern in self.patterns:
+            if not isinstance(pattern, str):
+                raise ValueError(
+                    f"artifact {self.key!r}: patterns must be strings; "
+                    f"got {type(pattern).__name__}"
+                )
 
     @property
     def missing_value(self) -> Any:
+        """A fresh copy of this artifact's default, safe for a caller to mutate."""
         if self.default is _UNSET:
-            return _DERIVED_DEFAULTS[self.kind]
-        return self.default
+            return _DERIVED_DEFAULTS[self.kind]()
+        return copy.deepcopy(self.default)
 
     def matches(self, output_dir: Path, basename: str) -> list[Path]:
         """Files this artifact resolves to, in pattern order then name order."""
         found: list[Path] = []
         for pattern in self.patterns:
-            hits = sorted(
-                p for p in output_dir.glob(pattern.format(basename=basename))
-                if p.is_file()
-            )
+            expanded = pattern.format(basename=_glob.escape(basename))
+            hits = sorted(p for p in output_dir.glob(expanded) if p.is_file())
             if not hits:
                 continue
-            if self.kind == B64MAP:
-                found.extend(hits)
-            else:
+            if self.kind in _SINGLE_VALUE_KINDS:
+                if len(hits) > 1:
+                    raise ValueError(
+                        f"artifact {self.key!r} is a single-value {self.kind!r} "
+                        f"artifact but pattern {pattern!r} matched "
+                        f"{len(hits)} files: "
+                        f"{', '.join(p.name for p in hits)}. Narrow the pattern, "
+                        f"or declare it as {B64MAP!r} to collect them all."
+                    )
                 # First pattern that matched decides it — later patterns are
                 # fallbacks, not additions.
-                return hits[:1]
+                return hits
+            found.extend(hits)
+
+        if self.kind == B64MAP:
+            counts = Counter(p.name for p in found)
+            collisions = sorted(n for n, c in counts.items() if c > 1)
+            if collisions:
+                raise ValueError(
+                    f"artifact {self.key!r} collected more than one file named "
+                    f"{', '.join(repr(n) for n in collisions)}. Keys are "
+                    f"filenames, so these would overwrite each other — narrow "
+                    f"the patterns or split them into separate artifacts."
+                )
         return found
 
     def read(self, output_dir: Path, basename: str) -> Any:
-        """Value for this artifact, or its default when nothing matched."""
+        """Value for this artifact, or a fresh default when nothing matched."""
         hits = self.matches(output_dir, basename)
         if not hits:
             return self.missing_value
 
         if self.kind == TEXT:
-            return hits[0].read_text(encoding="utf-8")
+            try:
+                return hits[0].read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError) as e:
+                return self._unreadable(hits[0], e)
 
         if self.kind == JSON:
             try:
                 return json.loads(hits[0].read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # A truncated or non-JSON file is the engine's problem to fix,
-                # but it must not take down a response that is otherwise fine.
-                return self.missing_value
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+                return self._unreadable(hits[0], e)
 
         return {
             p.name: base64.b64encode(p.read_bytes()).decode("ascii")
             for p in hits
         }
+
+    def _unreadable(self, path: Path, exc: Exception) -> Any:
+        """Fall back to the default, loudly.
+
+        A truncated or unreadable artifact is the engine's problem to fix, and
+        it must not take down a response that is otherwise complete. But a
+        response that silently substitutes an empty value is a defect nobody
+        can count, so the substitution is logged: at scale, the log line is the
+        only way this class of failure is visible at all.
+        """
+        _logging.warning(
+            "artifact unreadable; substituting its default",
+            artifact=self.key,
+            kind=self.kind,
+            file=path.name,
+            error_type=type(exc).__name__,
+        )
+        return self.missing_value
+
+
+def validate(manifest: Iterable[Artifact]) -> tuple[Artifact, ...]:
+    """Check a manifest as a whole. Returns it as a tuple.
+
+    Per-artifact rules are enforced at construction; this catches the one that
+    only exists between artifacts — two entries claiming the same response key,
+    where ``keys()`` would advertise both and ``resolve()`` would return one.
+    """
+    entries = tuple(manifest)
+    counts = Counter(a.key for a in entries)
+    duplicates = sorted(k for k, c in counts.items() if c > 1)
+    if duplicates:
+        raise ValueError(
+            f"manifest declares duplicate keys: {', '.join(duplicates)}. "
+            f"Each response key may come from exactly one artifact."
+        )
+    return entries
 
 
 def resolve(
@@ -138,14 +225,15 @@ def resolve(
     is omitted from the result, not present-as-empty, so a caller asking for
     markdown only does not pay to base64 every image.
     """
+    entries = validate(manifest)
     wanted = set(keys) if keys is not None else None
     return {
         art.key: art.read(output_dir, basename)
-        for art in manifest
+        for art in entries
         if wanted is None or art.key in wanted
     }
 
 
 def keys(manifest: Iterable[Artifact]) -> list[str]:
     """Response keys a manifest can produce, in declaration order."""
-    return [art.key for art in manifest]
+    return [art.key for art in validate(manifest)]
