@@ -7,6 +7,14 @@ particular worker, and the harness quietly becomes a fork of that worker again.
 Names are checked in source rather than behaviour because that is where the
 leak shows up first — usually in a docstring or an error message that was
 copied across without being reread.
+
+What this cannot catch: an engine's *vocabulary* that shares no substring with
+its name. A backend identifier, a model nickname, a flag spelling — all read as
+ordinary words. A review caught exactly that (a worker's production backend
+value sitting in a log fixture) after this file was already green. So the list
+below is a floor, not a proof: when adding a fixture value, ask whether it
+would mean anything to someone who had never heard of the engine, and if not,
+invent one that would.
 """
 
 from __future__ import annotations

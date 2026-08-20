@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from runpod_doc_worker import config
 from runpod_doc_worker.testing import hub
 
 
@@ -98,10 +99,45 @@ def test_a_missing_file_says_so(tmp_path):
 
 
 def test_test_inputs_under_default_roots(tmp_path):
-    spec = {"tests": [{"input": {"volume_path": "/worker/fixture.pdf"}}]}
+    spec = {"tests": [{"input": {"volume_path": "/runpod-volume/fixture.pdf"}}]}
     path = tmp_path / "tests.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
     hub.check_test_inputs(path)
+
+
+def test_a_worker_declared_root_makes_its_baked_path_valid(tmp_path):
+    """A fixture copied into the image lives wherever that image's WORKDIR is.
+    The worker declares that root; the harness does not assume it."""
+    spec = {"tests": [{"input": {"volume_path": "/worker/test-fixture.pdf"}}]}
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="outside the input roots"):
+        hub.check_test_inputs(path)
+
+    config.configure(config.WorkerConfig(
+        volume_roots=config.DEFAULT_VOLUME_ROOTS + ("/worker",),
+    ))
+    try:
+        hub.check_test_inputs(path)
+    finally:
+        config.reset()
+
+
+def test_explicit_roots_override_the_active_config(tmp_path):
+    spec = {"tests": [{"input": {"volume_path": "/opt/acme/fixture.pdf"}}]}
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    hub.check_test_inputs(path, roots=("/opt/acme",))
+
+
+def test_a_spec_with_no_tests_key_is_rejected(tmp_path):
+    """A validator that reports clean on a file that lost its contents is
+    worse than no validator."""
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    with pytest.raises(AssertionError, match="no 'tests' key"):
+        hub.check_test_inputs(path)
 
 
 def test_test_input_outside_the_roots_is_rejected(tmp_path):

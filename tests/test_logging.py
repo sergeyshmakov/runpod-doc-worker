@@ -7,13 +7,9 @@ because that's the only output channel.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
-import sys
 from contextlib import redirect_stdout
-
-import pytest
 
 from runpod_doc_worker import config
 from runpod_doc_worker.obs import logging as worker_logging
@@ -33,13 +29,13 @@ def _capture(callable_, *args, **kwargs) -> str:
 
 def test_info_emits_one_line_json(monkeypatch):
     monkeypatch.setenv("LOG_FORMAT", "json")
-    out = _capture(worker_logging.info, "test message", backend="vlm-auto-engine", pages=10)
+    out = _capture(worker_logging.info, "test message", backend="local-engine", pages=10)
     assert out.count("\n") == 1
     data = json.loads(out.strip())
     assert data["msg"] == "test message"
     assert data["level"] == "info"
     assert data["logger"] == config.active().logger_name
-    assert data["backend"] == "vlm-auto-engine"
+    assert data["backend"] == "local-engine"
     assert data["pages"] == 10
     assert data["ts"].endswith("Z")
 
