@@ -153,3 +153,26 @@ def test_test_inputs_without_a_volume_path_are_skipped(tmp_path):
     path = tmp_path / "tests.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
     hub.check_test_inputs(path)
+
+
+@pytest.mark.parametrize("volume_path", [
+    "/runpod-volume/../etc/document.pdf",
+    "/runpod-volume/./../../etc/document.pdf",
+    "/workspace/sub/../../etc/document.pdf",
+])
+def test_a_traversing_test_input_is_rejected(tmp_path, volume_path):
+    """PurePosixPath keeps `..`, so /runpod-volume stays in `parents` and the
+    path passes here while the runtime resolves it and refuses it — which is
+    the deployment failure this validator exists to prevent."""
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps({"tests": [{"input": {"volume_path": volume_path}}]}), encoding="utf-8")
+    with pytest.raises(AssertionError, match="outside the input roots"):
+        hub.check_test_inputs(path)
+
+
+def test_an_interior_traversal_that_stays_inside_is_allowed(tmp_path):
+    """Normalising must not reject a path that lands back under a root."""
+    spec = {"tests": [{"input": {"volume_path": "/runpod-volume/a/../fixture.pdf"}}]}
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    hub.check_test_inputs(path)

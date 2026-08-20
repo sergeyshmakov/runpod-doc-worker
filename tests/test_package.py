@@ -235,3 +235,28 @@ def test_an_ordinary_manifest_key_is_unaffected(output_dir):
     entry = _entry(output_dir, formats=None)
     assert entry["markdown"] == "# hello\n"
     assert entry["source"] == "url:https://example.com/doc.pdf"
+
+
+def test_a_one_shot_manifest_survives_validation(output_dir):
+    """`manifest` is typed as an Iterable, so a generator is a legal thing to
+    pass. Validating it by materialising it once would otherwise leave the
+    packaging call an exhausted iterator and drop every artifact silently."""
+    entry = package.package_results_entry(
+        transport="inline",
+        formats=None,
+        output_dir=output_dir,
+        basename="doc",
+        source="url:https://example.com/doc.pdf",
+        manifest=(a for a in MANIFEST),
+    )
+    assert entry["markdown"] == "# hello\n"
+    assert entry["content_list"] == [{"type": "text"}]
+
+
+def test_a_one_shot_manifest_is_still_checked_for_reserved_keys(output_dir):
+    bad = (a for a in MANIFEST + (Artifact("source", ("{basename}.md",)),))
+    with pytest.raises(ValueError, match="source"):
+        package.package_results_entry(
+            transport="inline", formats=None, output_dir=output_dir,
+            basename="doc", source="url:real", manifest=bad,
+        )

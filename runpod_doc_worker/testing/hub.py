@@ -103,6 +103,7 @@ def check_test_inputs(path: str | Path, roots: Iterable[str] | None = None) -> N
     Compared as POSIX paths regardless of the machine running the check: these
     are container paths, not local ones.
     """
+    import posixpath
     from pathlib import PurePosixPath
 
     from runpod_doc_worker import config as _config
@@ -124,7 +125,12 @@ def check_test_inputs(path: str | Path, roots: Iterable[str] | None = None) -> N
         volume_path = case.get("input", {}).get("volume_path")
         if not volume_path:
             continue
-        target = PurePosixPath(volume_path)
+        # Normalised first: PurePosixPath keeps `..` as a component, so
+        # `/runpod-volume/../etc/doc.pdf` still lists `/runpod-volume` among its
+        # parents and would pass here — while the worker resolves it at runtime
+        # and refuses it, which is the deployment failure this check exists to
+        # catch beforehand.
+        target = PurePosixPath(posixpath.normpath(volume_path))
         if not any(r == target or r in target.parents for r in allowed):
             raise AssertionError(
                 f"{volume_path!r} from {p.name} is outside the input roots "

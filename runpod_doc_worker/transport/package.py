@@ -253,12 +253,17 @@ def package_results_entry(
             f"transport must be one of {sorted(VALID_TRANSPORTS)}; got {transport!r}"
         )
     _refuse_reserved("metadata", set(metadata or {}))
+    # Materialised once, then used for both the check and the packaging.
+    # `manifest` is typed as an Iterable, so a generator is a legal thing to
+    # hand in — and reading it twice would leave the second read an exhausted
+    # iterator, dropping every artifact from the response without a word.
+    entries = _artifacts.validate(manifest)
     # The inline payload is merged in after metadata, so a manifest declaring
     # `source` would overwrite the envelope by the very route metadata cannot.
     # Checked on every transport: the archive paths do not read the manifest,
     # but a manifest that could corrupt an inline entry is a declaration bug
     # whichever transport happens to be asked for first.
-    _refuse_reserved("manifest", set(_artifacts.keys(manifest)))
+    _refuse_reserved("manifest", {a.key for a in entries})
 
     entry: dict[str, Any] = {
         "basename": basename,
@@ -271,6 +276,6 @@ def package_results_entry(
         entry.update(package_s3(output_dir, basename, archive_format))
     else:  # inline
         entry.update(
-            package_inline(output_dir, basename, manifest, formats=formats)
+            package_inline(output_dir, basename, entries, formats=formats)
         )
     return entry
