@@ -132,3 +132,53 @@ def test_job_id_omitted_when_unset(monkeypatch):
     out = _capture(worker_logging.info, "hi")
     assert "job_id" not in json.loads(out.strip())
 
+
+
+# -----------------------------------------------------------------------------
+# Caller fields cannot shadow the fields the record is indexed by
+# -----------------------------------------------------------------------------
+
+def test_caller_fields_cannot_shadow_authoritative_json_fields(monkeypatch):
+    """`info(..., level="error")` must not make an info line index as an error,
+    and a caller-supplied job_id must not defeat the contextvar correlation."""
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    worker_logging.job_id_var.set("real-job")
+    try:
+        out = _capture(
+            worker_logging.info, "hello",
+            level="error", logger="somewhere-else", ts="1999-01-01T00:00:00Z",
+            job_id="spoofed", backend="local-engine",
+        )
+    finally:
+        worker_logging.job_id_var.set(None)
+    record = json.loads(out.strip())
+    assert record["level"] == "info"
+    assert record["logger"] == config.active().logger_name
+    assert record["job_id"] == "real-job"
+    assert record["ts"] != "1999-01-01T00:00:00Z"
+    assert record["backend"] == "local-engine"
+
+
+def test_text_format_does_not_repeat_a_shadowed_field(monkeypatch):
+    """Text kept the generated values while json replaced them, so the same
+    call meant different things depending on a format env var."""
+    monkeypatch.setenv("LOG_FORMAT", "text")
+    worker_logging.job_id_var.set("real-job")
+    try:
+        out = _capture(worker_logging.info, "hello", job_id="spoofed")
+    finally:
+        worker_logging.job_id_var.set(None)
+    assert out.count("job_id=") == 1
+    assert "spoofed" not in out
+
+
+def test_the_mirror_sees_the_authoritative_fields(monkeypatch):
+    seen = []
+    config.configure(config.WorkerConfig(log_mirror=lambda lvl, msg, f: seen.append(f)))
+    try:
+        worker_logging.job_id_var.set("real-job")
+        _capture(worker_logging.info, "hello", job_id="spoofed")
+    finally:
+        worker_logging.job_id_var.set(None)
+        config.reset()
+    assert seen[0]["job_id"] == "real-job"

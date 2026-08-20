@@ -209,3 +209,29 @@ def test_s3_reports_only_the_vars_that_are_missing(monkeypatch, output_dir):
         package.package_s3(output_dir, "doc")
     assert "BUCKET_SECRET_ACCESS_KEY" in str(exc.value)
     assert "BUCKET_NAME" not in str(exc.value)
+
+
+@pytest.mark.parametrize("reserved", ["basename", "source"])
+def test_a_manifest_may_not_claim_a_reserved_key(output_dir, reserved):
+    """`source` is a plausible engine output. The inline payload is merged into
+    the entry after metadata, so without this it would overwrite the field that
+    says where the document came from — by the same route metadata already
+    cannot."""
+    manifest = MANIFEST + (Artifact(reserved, ("{basename}.md",), kind="text"),)
+    with pytest.raises(ValueError, match=reserved):
+        _entry(output_dir, manifest=manifest, formats=None)
+
+
+def test_a_reserved_manifest_key_is_refused_on_every_transport(output_dir):
+    """The archive transports do not read the manifest, but a manifest that
+    could corrupt an inline entry is a declaration bug either way."""
+    manifest = MANIFEST + (Artifact("source", ("{basename}.md",), kind="text"),)
+    for transport in ("inline", "tarball_b64"):
+        with pytest.raises(ValueError, match="source"):
+            _entry(output_dir, manifest=manifest, transport=transport, formats=None)
+
+
+def test_an_ordinary_manifest_key_is_unaffected(output_dir):
+    entry = _entry(output_dir, formats=None)
+    assert entry["markdown"] == "# hello\n"
+    assert entry["source"] == "url:https://example.com/doc.pdf"

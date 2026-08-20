@@ -33,9 +33,20 @@ from runpod_doc_worker.contract import artifacts as _artifacts
 # directly.
 VALID_TRANSPORTS = frozenset({"tarball_b64", "inline", "s3"})
 
-# Entry keys the harness is authoritative for, and an engine's metadata may
-# therefore not overwrite.
+# Entry keys the harness is authoritative for. Neither an engine's metadata nor
+# its artifact manifest may supply them: both are merged into the entry, so
+# either could otherwise replace the field that says which document this is and
+# where it came from.
 RESERVED_ENTRY_KEYS = frozenset({"basename", "source"})
+
+
+def _refuse_reserved(what: str, keys: set[str]) -> None:
+    claimed = RESERVED_ENTRY_KEYS & keys
+    if claimed:
+        raise ValueError(
+            f"{what} may not contain {', '.join(sorted(claimed))} — the harness "
+            f"owns {' and '.join(sorted(RESERVED_ENTRY_KEYS))} on a results entry"
+        )
 
 
 def _build_tarball_bytes(output_dir: Path) -> bytes:
@@ -241,14 +252,13 @@ def package_results_entry(
         raise ValueError(
             f"transport must be one of {sorted(VALID_TRANSPORTS)}; got {transport!r}"
         )
-    if metadata:
-        claimed = RESERVED_ENTRY_KEYS & set(metadata)
-        if claimed:
-            raise ValueError(
-                f"metadata may not contain {', '.join(sorted(claimed))} — "
-                f"the harness owns {' and '.join(sorted(RESERVED_ENTRY_KEYS))} "
-                f"on a results entry"
-            )
+    _refuse_reserved("metadata", set(metadata or {}))
+    # The inline payload is merged in after metadata, so a manifest declaring
+    # `source` would overwrite the envelope by the very route metadata cannot.
+    # Checked on every transport: the archive paths do not read the manifest,
+    # but a manifest that could corrupt an inline entry is a declaration bug
+    # whichever transport happens to be asked for first.
+    _refuse_reserved("manifest", set(_artifacts.keys(manifest)))
 
     entry: dict[str, Any] = {
         "basename": basename,

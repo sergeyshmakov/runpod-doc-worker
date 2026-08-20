@@ -43,6 +43,19 @@ job_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+# Fields the record is identified and indexed by. A caller passing one of these
+# as a keyword is shadowing the thing a log sink sorts on — an `info()` call
+# arriving as `level: "error"`, or a job's own id replaced by whatever a caller
+# had to hand, which defeats the correlation the contextvar exists for. They are
+# dropped rather than merged, and identically in both formats: the same call
+# must not mean two different things depending on an env var.
+RESERVED_FIELDS = frozenset({"ts", "level", "logger", "msg", "job_id"})
+
+
+def _caller_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in fields.items() if k not in RESERVED_FIELDS}
+
+
 def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
     """Build a one-line JSON record. Always includes ts, level, logger, msg."""
     now = time.time()
@@ -55,7 +68,7 @@ def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
     }
     if (jid := job_id_var.get()) is not None:
         record["job_id"] = jid
-    record.update(fields)
+    record.update(_caller_fields(fields))
     return json.dumps(record, default=str)
 
 
@@ -65,7 +78,7 @@ def _format_text(level: str, msg: str, fields: dict[str, Any]) -> str:
     parts = [f"{ts} {level.upper():<5} [{_config.active().logger_name}] {msg}"]
     if (jid := job_id_var.get()) is not None:
         parts.append(f"job_id={jid}")
-    for k, v in fields.items():
+    for k, v in _caller_fields(fields).items():
         parts.append(f"{k}={v}")
     return " ".join(parts)
 
@@ -87,10 +100,11 @@ def _emit(level: str, msg: str, fields: dict[str, Any]) -> None:
     if mirror is None:
         return
     # Pass the job_id along as an attribute so the mirrored record carries the
-    # same correlation field the stdout line has.
-    attrs = dict(fields)
+    # same correlation field the stdout line has — and the same one, so a
+    # caller-supplied job_id cannot make the two sinks disagree.
+    attrs = _caller_fields(fields)
     if (jid := job_id_var.get()) is not None:
-        attrs.setdefault("job_id", jid)
+        attrs["job_id"] = jid
     try:
         mirror(level, msg, attrs)
     except Exception as e:  # noqa: BLE001
