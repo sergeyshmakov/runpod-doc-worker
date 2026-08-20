@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import sys
 import tarfile
 import zipfile
 
@@ -353,3 +354,50 @@ def test_both_containers_agree_on_a_symlinked_member(tmp_path):
     with zipfile.ZipFile(io.BytesIO(zip_raw)) as zf:
         zip_files = {n: zf.read(n) for n in zf.namelist()}
     assert tar_files == zip_files
+
+
+# -----------------------------------------------------------------------------
+# The member NAME is part of the boundary, not just the source path
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    r"..\outside.txt",
+    r"C:\temp\evil.txt",
+    r"sub\..\..\outside.txt",
+    "../outside.txt",
+    "/etc/passwd",
+    r"\server\share\evil.txt",
+])
+def test_a_hostile_archive_name_is_refused(name):
+    """A backslash is a legal character in a POSIX filename, so a file can sit
+    legitimately inside output_dir under a name a Windows extractor reads as a
+    path. The containment check validates where the file IS; this validates
+    what the archive would CALL it."""
+    assert not package._safe_arcname(name), f"accepted {name!r}"
+
+
+@pytest.mark.parametrize("name", [
+    "doc.md",
+    "images/fig1.png",
+    "nested/deeper/file.json",
+    "file with spaces.txt",
+    "unicode-ü.md",
+])
+def test_an_ordinary_archive_name_is_kept(name):
+    assert package._safe_arcname(name), f"rejected {name!r}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is not a legal filename character on Windows")
+def test_a_backslash_named_file_is_skipped_from_both_archives(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "doc.md").write_bytes(b"# hello\n")
+    (out / r"..\outside.txt").write_bytes(b"ESCAPES ON WINDOWS")
+
+    zip_raw = base64.b64decode(package.package_tarball(out, "zip"))
+    with zipfile.ZipFile(io.BytesIO(zip_raw)) as zf:
+        assert zf.namelist() == ["doc.md"]
+
+    tar_raw = base64.b64decode(package.package_tarball(out))
+    with tarfile.open(fileobj=io.BytesIO(tar_raw), mode="r:gz") as tar:
+        assert [m.name for m in tar.getmembers()] == ["doc.md"]

@@ -67,6 +67,29 @@ def _escapes(output_dir: Path, candidate: Path) -> bool:
     return not (target == root or root in target.parents)
 
 
+def _safe_arcname(name: str) -> bool:
+    """Whether ``name`` is safe to write into an archive as a member name.
+
+    Containment checks answer where a file *is*; this answers what the archive
+    would *call* it, which is what an extractor acts on. A backslash is a legal
+    character in a POSIX filename, so a file can sit legitimately inside the
+    output directory under a name like ``..\\outside.txt`` — and an extractor
+    that treats backslashes as separators then writes outside its destination.
+
+    Both separator conventions are checked, because the archive is built on one
+    platform and opened on another.
+    """
+    if not name or name in (".", ".."):
+        return False
+    if name.startswith(("/", "\\")):
+        return False
+    # A drive letter or a UNC prefix makes the name absolute on Windows.
+    if len(name) >= 2 and name[1] == ":":
+        return False
+    parts = name.replace("\\", "/").split("/")
+    return not any(part in ("", ".", "..") for part in parts)
+
+
 def _archive_members(output_dir: Path) -> list[Path]:
     """Regular files under ``output_dir`` that stay inside it, in a stable order.
 
@@ -82,6 +105,12 @@ def _archive_members(output_dir: Path) -> list[Path]:
         if _escapes(output_dir, child):
             _logging.warning(
                 "archive member points outside the output directory; skipping it",
+                file=child.name,
+            )
+            continue
+        if not _safe_arcname(child.relative_to(output_dir).as_posix()):
+            _logging.warning(
+                "archive member name is unsafe to extract; skipping it",
                 file=child.name,
             )
             continue
