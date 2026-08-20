@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import os
 import socket
 import time
 from typing import Any
@@ -41,11 +40,6 @@ from runpod_doc_worker import config as _config
 
 
 ALLOWED_SCHEMES = ("http", "https")
-
-
-def _truthy(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
 
 ALLOW_LOCAL_FETCH = "ALLOW_LOCAL_FETCH"
 
