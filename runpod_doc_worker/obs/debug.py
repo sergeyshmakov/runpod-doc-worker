@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import os
+from collections import deque
 from itertools import islice as _islice
 from pathlib import Path
 from typing import Any
@@ -118,22 +119,40 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
 
     refs_main = model_root / "refs" / "main"
     out["refs_main_path"] = str(refs_main)
+    refs_main_unreadable = False
     if refs_main.is_file():
         try:
             out["refs_main_content"] = refs_main.read_text(encoding="utf-8").strip()
         except OSError as e:
-            out["refs_main_content"] = f"<read error: {e}>"
+            # Kept as the diagnosis rather than written into the field a hash
+            # belongs in. Storing the error text there made the resolution
+            # branch below report "stale refs/main", replacing a permission or
+            # volume error with a wrong answer — in exactly the conditions this
+            # probe exists to explain.
+            refs_main_unreadable = True
+            out["issue"] = f"refs/main could not be read: {type(e).__name__}: {e}"
 
     snapshots_dir = model_root / "snapshots"
     out["snapshots_dir_exists"] = snapshots_dir.is_dir()
     if out["snapshots_dir_exists"]:
         try:
-            out["snapshot_subdirs"] = sorted(
-                d.name for d in snapshots_dir.iterdir() if d.is_dir()
-            )
+            # Bounded like every other listing here: a cache with thousands of
+            # snapshot dirs must not decide how long the diagnostic takes.
+            names = [
+                d.name
+                for d in _islice(
+                    (e for e in snapshots_dir.iterdir() if e.is_dir()),
+                    PROBE_MAX_ENTRIES,
+                )
+            ]
+            out["snapshot_subdirs"] = sorted(names)
         except OSError as e:
             out["issue"] = f"snapshots/ iter error: {e}"
             return out
+
+    if refs_main_unreadable:
+        # No hash to resolve from, and guessing past the failure would bury it.
+        return out
 
     # Resolution attempt 1: refs/main → snapshots/<hash>/
     if out["refs_main_content"] and isinstance(out["refs_main_content"], str):
@@ -225,7 +244,11 @@ def probe_filesystem() -> dict[str, Any]:
         if not root.is_dir():
             continue
         try:
-            out["models_found"] = find_model_dirs(root)
+            out["models_found"], note = find_model_dirs(root)
+            if note:
+                # A partial answer that reads as complete would send an
+                # operator looking in the wrong place.
+                out["models_search_note"] = note
         except (PermissionError, OSError) as e:
             out["models_found_error"] = f"{type(e).__name__}: {e}"
 
@@ -239,6 +262,10 @@ def probe_filesystem() -> dict[str, Any]:
 PROBE_MAX_DEPTH = 4
 PROBE_MAX_MATCHES = 20
 PROBE_MAX_ENTRIES = 50
+# Directory entries the model search will look at before giving up. This is
+# the bound that survives a volume with no models in it at all.
+PROBE_MAX_VISITS = 2000
+PROBE_MAX_SNAPSHOTS = 5
 
 
 def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] | str:
@@ -274,45 +301,79 @@ def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] |
     return result
 
 
+def _snapshot_names(model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS) -> list[str]:
+    """Up to ``limit`` snapshot directory names, without reading past them."""
+    snapshots = model_dir / "snapshots"
+    try:
+        return [
+            d.name
+            for d in _islice(
+                (e for e in snapshots.iterdir() if e.is_dir()), limit
+            )
+        ]
+    except OSError:
+        return []
+
+
 def find_model_dirs(
     root: Path,
     max_depth: int = PROBE_MAX_DEPTH,
     limit: int = PROBE_MAX_MATCHES,
-) -> list[dict[str, Any]]:
-    """Model directories under ``root``, no deeper than ``max_depth``.
+    max_visits: int = PROBE_MAX_VISITS,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Model directories under ``root``. Returns ``(found, note)``.
 
-    Globs one level at a time rather than walking the tree and filtering after
-    the fact. `rglob` descends everything it can reach before anything gets
-    discarded, so on a large network volume the depth bound described the
-    results while the traversal stayed unbounded — and a probe that finds
-    nothing was the case that scanned the most.
+    Bounded three ways, because two were not enough. Depth stops it descending
+    forever; ``limit`` stops it once it has enough answers; and ``max_visits``
+    stops it looking. That third bound is the one a glob cannot express: a
+    lazy pattern can only be cut short by *yielding*, so a tree with no matches
+    at all yields nothing and gets enumerated in full to prove a negative — and
+    a volume with no models is precisely what an operator probes.
 
-    ``limit`` stops the enumeration rather than trimming its result: sorting a
-    level first would mean visiting every entry in it before the cap could
-    apply, which is the same mistake one layer down. The cost is that when a
-    level holds more matches than the limit, which ones come back is the
-    filesystem's order rather than sorted order. For a diagnostic answering
-    "is anything here at all", a bounded answer beats a complete one.
+    So this walks explicitly rather than globbing per level. ``note`` is
+    non-None when a budget stopped the search, because a partial answer that
+    looks complete is worse than no answer: "no models found" and "no models
+    found in the first 2000 directories" lead to different next steps.
+
+    A directory that matches is recorded and not descended into.
     """
     found: list[dict[str, Any]] = []
-    for depth in range(1, max_depth + 1):
-        pattern = "/".join(["*"] * (depth - 1) + ["models--*"])
-        # islice keeps the generator lazy, so enumeration stops with us.
-        for path in _islice(root.glob(pattern), limit - len(found)):
-            if not path.is_dir():
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
+    visits = 0
+
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        try:
+            entries = current.iterdir()
+        except OSError:
+            continue
+
+        for entry in entries:
+            visits += 1
+            if visits > max_visits:
+                return found, (
+                    f"search stopped after visiting {max_visits} directory "
+                    f"entries; results are partial"
+                )
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
                 continue
-            snapshots = path / "snapshots"
-            snap_names: list[str] = []
-            if snapshots.is_dir():
-                try:
-                    snap_names = [d.name for d in snapshots.iterdir() if d.is_dir()][:5]
-                except OSError:
-                    pass
-            found.append({
-                "path": str(path),
-                "depth": depth,
-                "snapshots": snap_names,
-            })
-            if len(found) >= limit:
-                return found
-    return found
+
+            if entry.name.startswith("models--"):
+                found.append({
+                    "path": str(entry),
+                    "depth": depth + 1,
+                    "snapshots": _snapshot_names(entry),
+                })
+                if len(found) >= limit:
+                    return found, (
+                        f"stopped at the {limit}-match limit; there may be more"
+                    )
+            else:
+                queue.append((entry, depth + 1))
+
+    return found, None
