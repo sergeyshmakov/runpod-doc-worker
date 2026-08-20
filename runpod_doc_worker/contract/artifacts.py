@@ -62,6 +62,46 @@ _SINGLE_VALUE_KINDS = (TEXT, JSON)
 # None, which an engine is allowed to want.
 _UNSET = object()
 
+# Anything that could steer a formatted pattern out of the directory it was
+# given. Escaping handles glob syntax; separators survive it untouched.
+_BASENAME_SEPARATORS = ("/", "\\")
+
+
+def check_basename(basename: str) -> None:
+    """Reject a basename that could read outside the output directory.
+
+    A basename is a caller-supplied string in every worker that has one, and it
+    is substituted into a pattern that is then globbed. ``glob.escape`` makes
+    it literal as far as glob syntax goes, but leaves ``/``, ``\\`` and ``..``
+    alone — so ``{basename}.md`` with ``../other/doc`` reads a sibling
+    directory, which on a worker serving many jobs is another job's output.
+
+    Workers are expected to constrain this at their own schema too. This is the
+    check that does not depend on them having done so.
+    """
+    if not isinstance(basename, str) or not basename:
+        raise ValueError(f"basename must be a non-empty string; got {basename!r}")
+    for sep in _BASENAME_SEPARATORS:
+        if sep in basename:
+            raise ValueError(
+                f"basename may not contain a path separator; got {basename!r}"
+            )
+    # With separators gone, these are the only spellings left that name a
+    # directory rather than a file in it.
+    if basename in (".", ".."):
+        raise ValueError(f"basename may not be a path traversal; got {basename!r}")
+
+
+def _within(output_dir: Path, candidate: Path) -> bool:
+    """Whether ``candidate`` really sits beneath ``output_dir`` once resolved."""
+    try:
+        root = output_dir.resolve()
+        target = candidate.resolve()
+    except OSError:
+        return False
+    return target == root or root in target.parents
+
+
 # Factories, not values — see the module docstring on why a shared container
 # would be a bug rather than an optimisation.
 _DERIVED_DEFAULTS: dict[str, Any] = {
@@ -121,10 +161,18 @@ class Artifact:
 
     def matches(self, output_dir: Path, basename: str) -> list[Path]:
         """Files this artifact resolves to, in pattern order then name order."""
+        check_basename(basename)
         found: list[Path] = []
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
             hits = sorted(p for p in output_dir.glob(expanded) if p.is_file())
+            escapees = [p for p in hits if not _within(output_dir, p)]
+            if escapees:
+                raise ValueError(
+                    f"artifact {self.key!r}: pattern {pattern!r} matched "
+                    f"{escapees[0]}, which is outside the output directory. An "
+                    f"engine reads its own output, not whatever sits next to it."
+                )
             if not hits:
                 continue
             if self.kind in _SINGLE_VALUE_KINDS:
@@ -171,13 +219,19 @@ class Artifact:
             except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                 return self._unreadable(hits[0], e)
 
-        return {
-            p.name: base64.b64encode(p.read_bytes()).decode("ascii")
-            for p in hits
-        }
+        # A collection falls back per member rather than wholesale: a file that
+        # vanished between matching and reading should cost the response that
+        # one entry, not the other forty and the job with them.
+        collected: dict[str, str] = {}
+        for p in hits:
+            try:
+                collected[p.name] = base64.b64encode(p.read_bytes()).decode("ascii")
+            except OSError as e:
+                self._log_unreadable(p, e)
+        return collected
 
-    def _unreadable(self, path: Path, exc: Exception) -> Any:
-        """Fall back to the default, loudly.
+    def _log_unreadable(self, path: Path, exc: Exception) -> None:
+        """Say that a file could not be read.
 
         A truncated or unreadable artifact is the engine's problem to fix, and
         it must not take down a response that is otherwise complete. But a
@@ -192,6 +246,10 @@ class Artifact:
             file=path.name,
             error_type=type(exc).__name__,
         )
+
+    def _unreadable(self, path: Path, exc: Exception) -> Any:
+        """Log, then fall back to this artifact's default."""
+        self._log_unreadable(path, exc)
         return self.missing_value
 
 

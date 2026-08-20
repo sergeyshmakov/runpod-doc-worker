@@ -301,3 +301,75 @@ def test_json_artifact_parses_objects_too(tmp_path):
     manifest = (Artifact("middle", ("{basename}_middle.json",), kind="json"),)
     (tmp_path / "doc_middle.json").write_text(json.dumps({"pdf_info": []}), encoding="utf-8")
     assert resolve(manifest, tmp_path, "doc")["middle"] == {"pdf_info": []}
+
+
+# -----------------------------------------------------------------------------
+# A basename may not steer the read out of the output directory
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("basename", [
+    "../other/doc",
+    "..\other\doc",
+    "sub/doc",
+    "sub\doc",
+    "..",
+])
+def test_a_basename_with_path_components_is_rejected(tmp_path, basename):
+    """Escaping glob metacharacters does not neutralise a separator: `..` and
+    `/` survive it, so `{basename}.md` could read an adjacent job's output."""
+    with pytest.raises(ValueError, match="basename"):
+        resolve(MANIFEST, tmp_path, basename)
+
+
+def test_traversal_cannot_reach_an_adjacent_directory(tmp_path):
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "doc.md").write_text("ANOTHER JOB", encoding="utf-8")
+    job = tmp_path / "job"
+    job.mkdir()
+    with pytest.raises(ValueError, match="basename"):
+        resolve(MANIFEST, job, "../other/doc")
+
+
+def test_a_pattern_that_escapes_the_output_dir_is_refused(tmp_path):
+    """Defence in depth: the engine writes its own patterns, but none of them
+    has any business reading outside the directory it was given."""
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "leak.md").write_text("ANOTHER JOB", encoding="utf-8")
+    job = tmp_path / "job"
+    job.mkdir()
+    manifest = (Artifact("markdown", ("../other/leak.md",), kind="text"),)
+    with pytest.raises(ValueError, match="outside the output directory"):
+        resolve(manifest, job, "doc")
+
+
+def test_an_ordinary_basename_still_resolves(tmp_path):
+    (tmp_path / "report-2024_final.md").write_text("fine", encoding="utf-8")
+    assert resolve(MANIFEST, tmp_path, "report-2024_final")["markdown"] == "fine"
+
+
+# -----------------------------------------------------------------------------
+# An unreadable member of a collection is not a failed response
+# -----------------------------------------------------------------------------
+
+def test_an_unreadable_b64map_member_is_skipped(tmp_path, capsys, monkeypatch):
+    """A file can vanish between matching and reading. Text and json fall back
+    with a warning; a collection must not abort the whole response instead."""
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "fig1.png").write_bytes(b"one")
+    (images / "fig2.png").write_bytes(b"two")
+
+    real_read_bytes = Path.read_bytes
+
+    def flaky(self):
+        if self.name == "fig1.png":
+            raise OSError(2, "No such file or directory")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky)
+    out = resolve(MANIFEST, tmp_path, "doc")
+    assert list(out["images"]) == ["fig2.png"]
+
+    warning = json.loads(capsys.readouterr().out.strip())
+    assert warning["level"] == "warning"
+    assert warning["file"] == "fig1.png"
