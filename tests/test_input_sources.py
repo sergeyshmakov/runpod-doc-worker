@@ -887,3 +887,56 @@ def test_the_outer_budget_does_not_disturb_an_ordinary_fetch(monkeypatch):
     monkeypatch.setattr(worker_io, "_fetch_url", quick)
     raw, src = _resolve({"file_url": "https://cdn.example.com/quick.pdf"})
     assert raw == b"%PDF-1.4 fine"
+
+
+# -----------------------------------------------------------------------------
+# Malformed inline input is rejected at the boundary, not decoded into garbage
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", [
+    "!!!!",
+    "not base64 at all",
+    "@@@@@@@@",
+])
+def test_a_non_base64_payload_is_rejected(payload):
+    """b64decode discards non-alphabet characters by default, so this returned
+    empty or corrupted bytes and reported a successful fetch."""
+    with pytest.raises(ValueError, match="not valid base64"):
+        _resolve({"file_b64": payload})
+
+
+def test_a_payload_with_stray_characters_is_rejected():
+    """The dangerous case: enough valid base64 that the corrupted decode still
+    looks like a document, so nothing downstream notices."""
+    import base64 as _b64
+    good = _b64.b64encode(b"%PDF-1.4 real document").decode()
+    corrupt = good[:8] + "!!!" + good[8:]
+    with pytest.raises(ValueError, match="not valid base64"):
+        _resolve({"file_b64": corrupt})
+
+
+def test_a_valid_payload_still_decodes():
+    import base64 as _b64
+    payload = _b64.b64encode(b"%PDF-1.4 hello").decode()
+    raw, src = _resolve({"file_b64": payload})
+    assert raw == b"%PDF-1.4 hello"
+    assert src == "b64"
+
+
+@pytest.mark.parametrize("sep", ["\n", "\r\n", " ", "\t"])
+def test_line_wrapped_base64_is_still_accepted(sep):
+    """Encoders wrap base64, and the size ceiling in this module already
+    assumes they do. Validating without normalising whitespace first would
+    reject input that has always worked."""
+    import base64 as _b64
+    encoded = _b64.b64encode(b"%PDF-1.4 hello world padding here").decode()
+    wrapped = sep.join(encoded[i:i + 8] for i in range(0, len(encoded), 8))
+    raw, _ = _resolve({"file_b64": wrapped})
+    assert raw == b"%PDF-1.4 hello world padding here"
+
+
+def test_base64_padding_errors_are_reported_as_such():
+    import base64 as _b64
+    encoded = _b64.b64encode(b"%PDF-1.4 hello").decode().rstrip("=")[:-1]
+    with pytest.raises(ValueError, match="not valid base64"):
+        _resolve({"file_b64": encoded})

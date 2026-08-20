@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import time
 from pathlib import Path
 
@@ -196,7 +197,22 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
                 f"inline file too large (encoded length {len(file_b64)} chars); "
                 f"use file_url or volume_path for files > {MAX_INLINE_FILE_MB} MB"
             )
-        raw = base64.b64decode(file_b64)
+        # Whitespace first, then strict decoding. `b64decode` discards
+        # characters outside the alphabet by default, so `"!!!!"` decoded to
+        # empty bytes and a payload with stray characters decoded to a
+        # different document than the caller sent — both reported as a
+        # successful fetch, with the engine left to fail confusingly on the
+        # result. Validating without stripping first would be its own bug:
+        # encoders wrap base64 across lines, and the ceiling above already
+        # assumes they do.
+        compact = "".join(file_b64.split())
+        try:
+            raw = base64.b64decode(compact, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(
+                f"file_b64 is not valid base64 ({e}); it must be the "
+                f"base64-encoded body of the document, and nothing else"
+            ) from None
         if len(raw) > MAX_INLINE_FILE_MB * 1024 * 1024:
             raise ValueError(
                 f"inline file too large ({len(raw) / 1024 / 1024:.1f} MB); "
