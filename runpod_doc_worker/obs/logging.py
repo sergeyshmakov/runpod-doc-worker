@@ -56,6 +56,21 @@ def _caller_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if k not in RESERVED_FIELDS}
 
 
+def _render(level: str, msg: str, fields: dict[str, Any]) -> str:
+    """One record, in whichever format is configured.
+
+    Separate from :func:`_emit` so the mirror-failure path can produce a fully
+    formed record — timestamp, logger and job id included — without going back
+    through the mirror it is reporting on.
+
+    LOG_FORMAT is read per call so it can be flipped at runtime without a
+    restart, which is mostly useful in tests.
+    """
+    if os.environ.get("LOG_FORMAT", "json").lower() == "text":
+        return _format_text(level, msg, fields)
+    return _format_json(level, msg, fields)
+
+
 def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
     """Build a one-line JSON record. Always includes ts, level, logger, msg."""
     now = time.time()
@@ -84,17 +99,12 @@ def _format_text(level: str, msg: str, fields: dict[str, Any]) -> str:
 
 
 def _emit(level: str, msg: str, fields: dict[str, Any]) -> None:
-    """Write one log line to stdout. Re-reads LOG_FORMAT each call so it
-    can be flipped at runtime without restarting (mostly useful for tests).
-
-    Then mirror the same record to the worker's second sink, if it registered
-    one. The stdout line fires first so RunPod's dashboard is never gated on an
+    """Write one log line to stdout, then mirror it to the worker's second
+    sink if it registered one. The stdout line fires first so RunPod's dashboard is never gated on an
     external collector being reachable, and a raising mirror is swallowed for
     the same reason — telemetry export must not be able to fail a job.
     """
-    fmt = os.environ.get("LOG_FORMAT", "json").lower()
-    line = _format_text(level, msg, fields) if fmt == "text" else _format_json(level, msg, fields)
-    print(line, file=sys.stdout, flush=True)
+    print(_render(level, msg, fields), file=sys.stdout, flush=True)
 
     mirror = _config.active().log_mirror
     if mirror is None:
@@ -108,11 +118,15 @@ def _emit(level: str, msg: str, fields: dict[str, Any]) -> None:
     try:
         mirror(level, msg, attrs)
     except Exception as e:  # noqa: BLE001
-        # One line to stdout, which is the sink we know works. Not routed back
-        # through _emit(): a mirror that raises on every record would recurse.
+        # Built by the same formatter as every other record, so it carries the
+        # timestamp and job id too. The failure path is where correlation
+        # matters most: concurrent jobs, and a warning nobody can attribute to
+        # the request whose export failed.
+        #
+        # Written straight to stdout rather than routed back through _emit():
+        # a mirror that raises on every record would otherwise recurse.
         print(
-            f"{{\"level\":\"warning\",\"logger\":\"{_config.active().logger_name}\","
-            f"\"msg\":\"log mirror raised\",\"error\":\"{type(e).__name__}\"}}",
+            _render("warning", "log mirror raised", {"error_type": type(e).__name__}),
             file=sys.stdout,
             flush=True,
         )

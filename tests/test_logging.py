@@ -182,3 +182,62 @@ def test_the_mirror_sees_the_authoritative_fields(monkeypatch):
         worker_logging.job_id_var.set(None)
         config.reset()
     assert seen[0]["job_id"] == "real-job"
+
+
+def test_a_mirror_failure_record_carries_the_job_id(monkeypatch, capsys):
+    """The failure path is where correlation matters most: concurrent jobs, and
+    a warning that cannot be attributed to the request whose export failed."""
+    def boom(level, msg, fields):
+        raise RuntimeError("collector unreachable")
+
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    config.configure(config.WorkerConfig(log_mirror=boom))
+    try:
+        worker_logging.job_id_var.set("job-42")
+        worker_logging.info("hello")
+    finally:
+        worker_logging.job_id_var.set(None)
+        config.reset()
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    warning = json.loads(lines[-1])
+    assert warning["level"] == "warning"
+    assert warning["job_id"] == "job-42"
+    assert "ts" in warning
+    assert warning["logger"] == "worker"
+    assert "RuntimeError" in json.dumps(warning)
+
+
+def test_a_mirror_failure_record_is_valid_json_for_any_logger_name(monkeypatch, capsys):
+    """The record was hand-built by f-string, so a quote in the logger name
+    produced output no JSON reader could parse."""
+    def boom(level, msg, fields):
+        raise RuntimeError("nope")
+
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    config.configure(config.WorkerConfig(logger_name='we"ird', log_mirror=boom))
+    try:
+        worker_logging.info("hello")
+    finally:
+        config.reset()
+
+    for line in capsys.readouterr().out.splitlines():
+        if line.strip():
+            assert json.loads(line)["logger"] == 'we"ird'
+
+
+def test_a_failing_mirror_is_not_invoked_by_its_own_failure_record(monkeypatch, capsys):
+    """A mirror that raises on every record would recurse without this."""
+    calls = []
+
+    def boom(level, msg, fields):
+        calls.append(msg)
+        raise RuntimeError("nope")
+
+    config.configure(config.WorkerConfig(log_mirror=boom))
+    try:
+        worker_logging.info("hello")
+    finally:
+        config.reset()
+    capsys.readouterr()
+    assert calls == ["hello"]
