@@ -10,8 +10,18 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
+from pathlib import Path
 
 import pytest
+
+
+# `*` and `?` are legal in POSIX filenames and illegal in Windows ones, so the
+# cases that need such a file on disk only run where one can exist. The escaping
+# they cover is platform-independent.
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="filename is not creatable on Windows"
+)
 
 from runpod_doc_worker.contract.artifacts import Artifact, keys, resolve
 
@@ -124,6 +134,28 @@ def test_unreadable_json_falls_back_to_the_default(tmp_path):
     assert out["content_list"] == []
 
 
+def test_the_fallback_is_logged(tmp_path, capsys):
+    """Silence is the defect, not the fallback: an unlogged substitution is a
+    failure class nobody can count."""
+    (tmp_path / "doc_content_list.json").write_text("{not json", encoding="utf-8")
+    resolve(MANIFEST, tmp_path, "doc")
+    record = json.loads(capsys.readouterr().out.strip())
+    assert record["level"] == "warning"
+    assert record["artifact"] == "content_list"
+    assert record["error_type"] == "JSONDecodeError"
+
+
+def test_undecodable_text_and_json_behave_the_same(tmp_path, capsys):
+    """Same file class, same bad bytes — one kind must not fail the job while
+    the other returns a default."""
+    (tmp_path / "doc.md").write_bytes(b"\xff\xfe\x00bad")
+    (tmp_path / "doc_content_list.json").write_bytes(b"\xff\xfe\x00bad")
+    out = resolve(MANIFEST, tmp_path, "doc")
+    capsys.readouterr()
+    assert out["markdown"] == ""
+    assert out["content_list"] == []
+
+
 def test_keys_reports_declaration_order():
     assert keys(MANIFEST) == ["markdown", "content_list", "images"]
 
@@ -136,6 +168,133 @@ def test_rejects_an_unknown_kind():
 def test_rejects_an_empty_pattern_list():
     with pytest.raises(ValueError, match="at least one pattern"):
         Artifact("bad", ())
+
+
+def test_rejects_a_bare_string_of_patterns():
+    """A string is iterable, so this would otherwise be accepted and then fail
+    deep in packaging with a format-string error."""
+    with pytest.raises(ValueError, match="not a bare string"):
+        Artifact("bad", "{basename}.md")
+
+
+def test_rejects_an_empty_key():
+    with pytest.raises(ValueError, match="non-empty string"):
+        Artifact("", ("x",))
+
+
+def test_rejects_a_non_string_pattern():
+    with pytest.raises(ValueError, match="patterns must be strings"):
+        Artifact("bad", (Path("x"),))
+
+
+# -----------------------------------------------------------------------------
+# Defaults are per-read, not per-process
+# -----------------------------------------------------------------------------
+
+def test_a_mutated_default_does_not_leak_into_the_next_read(tmp_path):
+    """A worker process serves many jobs, and FlashBoot preserves it across
+    scale-to-zero. One mutation of a shared container would poison every later
+    job for the life of the process."""
+    first = resolve(MANIFEST, tmp_path, "doc")
+    first["content_list"].append("MUTATED")
+    second = resolve(MANIFEST, tmp_path, "other")
+    assert second["content_list"] == []
+
+
+def test_two_json_artifacts_do_not_alias_each_other(tmp_path):
+    manifest = (
+        Artifact("a", ("nope_a.json",), kind="json"),
+        Artifact("b", ("nope_b.json",), kind="json"),
+    )
+    out = resolve(manifest, tmp_path, "doc")
+    out["a"]["poisoned"] = True
+    assert out["b"] == {}
+
+
+def test_a_declared_default_is_not_shared_across_reads(tmp_path):
+    manifest = (Artifact("thing", ("nope.json",), kind="json", default={"a": [1]}),)
+    first = resolve(manifest, tmp_path, "doc")
+    first["thing"]["a"].append(2)
+    assert resolve(manifest, tmp_path, "doc")["thing"] == {"a": [1]}
+
+
+# -----------------------------------------------------------------------------
+# basename is data, not pattern syntax
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("basename", ["report[2024]", "[!x]", "a[b]c"])
+def test_glob_metacharacters_in_basename_resolve_literally(tmp_path, basename):
+    (tmp_path / f"{basename}.md").write_text("real content", encoding="utf-8")
+    assert resolve(MANIFEST, tmp_path, basename)["markdown"] == "real content"
+
+
+@posix_only
+@pytest.mark.parametrize("basename", ["doc*", "a?b"])
+def test_wildcard_metacharacters_in_basename_resolve_literally(tmp_path, basename):
+    (tmp_path / f"{basename}.md").write_text("real content", encoding="utf-8")
+    assert resolve(MANIFEST, tmp_path, basename)["markdown"] == "real content"
+
+
+@posix_only
+def test_a_wildcard_basename_does_not_match_another_document(tmp_path):
+    """Unescaped, `doc*.md` would match docA.md and return another job's text."""
+    (tmp_path / "doc*.md").write_text("the literal one", encoding="utf-8")
+    (tmp_path / "docA.md").write_text("someone else", encoding="utf-8")
+    assert resolve(MANIFEST, tmp_path, "doc*")["markdown"] == "the literal one"
+
+
+def test_engine_wildcards_in_the_pattern_still_work(tmp_path):
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "a.png").write_bytes(b"a")
+    (images / "b.png").write_bytes(b"b")
+    assert sorted(resolve(MANIFEST, tmp_path, "doc")["images"]) == ["a.png", "b.png"]
+
+
+# -----------------------------------------------------------------------------
+# Ambiguity is an error, not a silent choice
+# -----------------------------------------------------------------------------
+
+def test_a_single_value_kind_matching_two_files_raises(tmp_path):
+    """Truncating to the first hit would drop a page of a document and report
+    success."""
+    manifest = (Artifact("markdown", ("*.md",), kind="text"),)
+    (tmp_path / "page1.md").write_text("one", encoding="utf-8")
+    (tmp_path / "page2.md").write_text("two", encoding="utf-8")
+    with pytest.raises(ValueError, match="matched 2 files"):
+        resolve(manifest, tmp_path, "doc")
+
+
+def test_b64map_name_collision_across_patterns_raises(tmp_path):
+    """Keys are filenames, so two dirs with the same name would overwrite."""
+    manifest = (Artifact("images", ("images/*", "figures/*"), kind="b64map"),)
+    for sub in ("images", "figures"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "fig1.png").write_bytes(sub.encode())
+    with pytest.raises(ValueError, match="more than one file named"):
+        resolve(manifest, tmp_path, "doc")
+
+
+def test_b64map_across_patterns_without_collision_is_fine(tmp_path):
+    manifest = (Artifact("images", ("images/*", "figures/*"), kind="b64map"),)
+    for sub, name in (("images", "a.png"), ("figures", "b.png")):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / name).write_bytes(b"x")
+    assert sorted(resolve(manifest, tmp_path, "doc")["images"]) == ["a.png", "b.png"]
+
+
+def test_duplicate_manifest_keys_are_rejected(tmp_path):
+    """keys() would advertise both while resolve() returned one."""
+    manifest = (
+        Artifact("markdown", ("a.md",)),
+        Artifact("markdown", ("b.md",)),
+    )
+    with pytest.raises(ValueError, match="duplicate keys"):
+        resolve(manifest, tmp_path, "doc")
+    with pytest.raises(ValueError, match="duplicate keys"):
+        keys(manifest)
 
 
 def test_json_artifact_parses_objects_too(tmp_path):
