@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import os
+from itertools import islice as _islice
 from pathlib import Path
 from typing import Any
 
@@ -265,11 +266,19 @@ def find_model_dirs(
     discarded, so on a large network volume the depth bound described the
     results while the traversal stayed unbounded — and a probe that finds
     nothing was the case that scanned the most.
+
+    ``limit`` stops the enumeration rather than trimming its result: sorting a
+    level first would mean visiting every entry in it before the cap could
+    apply, which is the same mistake one layer down. The cost is that when a
+    level holds more matches than the limit, which ones come back is the
+    filesystem's order rather than sorted order. For a diagnostic answering
+    "is anything here at all", a bounded answer beats a complete one.
     """
     found: list[dict[str, Any]] = []
     for depth in range(1, max_depth + 1):
         pattern = "/".join(["*"] * (depth - 1) + ["models--*"])
-        for path in sorted(root.glob(pattern)):
+        # islice keeps the generator lazy, so enumeration stops with us.
+        for path in _islice(root.glob(pattern), limit - len(found)):
             if not path.is_dir():
                 continue
             snapshots = path / "snapshots"

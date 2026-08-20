@@ -7,6 +7,7 @@ image → PDF) belongs to the engine, not here.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 from pathlib import Path
@@ -177,58 +178,17 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
         )
 
     if file_url := job_input.get("file_url"):
-        max_bytes = MAX_URL_FILE_MB * 1024 * 1024
-        # httpx's timeout is an inactivity timeout: it resets on every byte
-        # that arrives. A server dripping one chunk every 119 seconds never
-        # trips it, and never approaches the size cap either, so the download
-        # is bounded by nothing. This deadline covers the whole fetch.
-        deadline = time.monotonic() + MAX_URL_FETCH_SECONDS
-        # The checked transport is the client's default, and whatever the
-        # environment wants proxied is mounted over it. Supplying a transport
-        # is what stops httpx reading the proxy environment itself, so that
-        # reading is done for it — otherwise an operator whose egress needs a
-        # proxy would have every download attempt a direct connection and fail.
-        #
-        # Requests the environment does not proxy — another scheme, or a
-        # NO_PROXY host — fall through the mounts to the default and stay on the
-        # checked path. Requests that are proxied open their socket to the
-        # proxy, which resolves the document host itself; where those end up is
-        # the proxy's to decide and its policy to enforce.
-        #
-        # The hook runs per request either way, which includes every redirect
-        # httpx follows on its own.
-        async with httpx.AsyncClient(
-            timeout=URL_FETCH_TIMEOUT_SECONDS,
-            transport=_net.CheckedTargetTransport(field="file_url"),
-            mounts=_net.environment_proxy_mounts(),
-            event_hooks={"request": [_net.request_hook]},
-        ) as client:
-            async with client.stream("GET", file_url, follow_redirects=True) as resp:
-                resp.raise_for_status()
-                # Pre-check Content-Length when the server provided one so we
-                # can fail before pulling bytes. Some CDNs omit it; for those
-                # we enforce the cap incrementally below.
-                cl = resp.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > max_bytes:
-                    raise ValueError(
-                        f"file_url body too large ({int(cl) / 1024 / 1024:.1f} MB); "
-                        f"max is {MAX_URL_FILE_MB} MB"
-                    )
-                buf = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
-                        raise ValueError(
-                            f"file_url body exceeded {MAX_URL_FILE_MB} MB while streaming"
-                        )
-                    if time.monotonic() > deadline:
-                        raise ValueError(
-                            f"file_url download exceeded the "
-                            f"{MAX_URL_FETCH_SECONDS:.0f}s budget after "
-                            f"{len(buf) / 1024 / 1024:.1f} MB; the server is "
-                            f"sending too slowly to finish"
-                        )
-                return bytes(buf), f"url:{file_url}"
+        try:
+            return await asyncio.wait_for(
+                _fetch_url(file_url), timeout=MAX_URL_FETCH_SECONDS
+            )
+        except asyncio.TimeoutError:
+            # Covers the parts a check between chunks cannot reach: a chain of
+            # slow redirects, a connection that stalls before the first byte,
+            # and a chunk that never arrives at all.
+            raise ValueError(
+                f"file_url fetch exceeded the {MAX_URL_FETCH_SECONDS:.0f}s budget"
+            ) from None
 
     if file_b64 := job_input.get("file_b64"):
         if len(file_b64) > _max_inline_b64_chars():
@@ -249,3 +209,66 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
     # Label keeps the caller's own spelling of the path — it's what they sent
     # and what they'll match against in their own logs.
     return resolved.read_bytes(), f"volume:{volume_path}"
+
+
+async def _fetch_url(file_url: str) -> tuple[bytes, str]:
+    """GET a document, bounded by size and by wall clock.
+
+    The caller wraps this in `asyncio.wait_for`, which is what bounds the
+    phases with no loop to check in — connect, redirects, and the wait for a
+    chunk that never comes. The in-loop check below is kept because it can say
+    how far the download got before it ran out of budget, which a cancelled
+    task cannot.
+    """
+    max_bytes = MAX_URL_FILE_MB * 1024 * 1024
+    # httpx's timeout is an inactivity timeout: it resets on every byte
+    # that arrives. A server dripping one chunk every 119 seconds never
+    # trips it, and never approaches the size cap either, so the download
+    # is bounded by nothing without this.
+    deadline = time.monotonic() + MAX_URL_FETCH_SECONDS
+    # The checked transport is the client's default, and whatever the
+    # environment wants proxied is mounted over it. Supplying a transport
+    # is what stops httpx reading the proxy environment itself, so that
+    # reading is done for it — otherwise an operator whose egress needs a
+    # proxy would have every download attempt a direct connection and fail.
+    #
+    # Requests the environment does not proxy — another scheme, or a
+    # NO_PROXY host — fall through the mounts to the default and stay on the
+    # checked path. Requests that are proxied open their socket to the
+    # proxy, which resolves the document host itself; where those end up is
+    # the proxy's to decide and its policy to enforce.
+    #
+    # The hook runs per request either way, which includes every redirect
+    # httpx follows on its own.
+    async with httpx.AsyncClient(
+        timeout=URL_FETCH_TIMEOUT_SECONDS,
+        transport=_net.CheckedTargetTransport(field="file_url"),
+        mounts=_net.environment_proxy_mounts(),
+        event_hooks={"request": [_net.request_hook]},
+    ) as client:
+        async with client.stream("GET", file_url, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            # Pre-check Content-Length when the server provided one so we
+            # can fail before pulling bytes. Some CDNs omit it; for those
+            # we enforce the cap incrementally below.
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
+                raise ValueError(
+                    f"file_url body too large ({int(cl) / 1024 / 1024:.1f} MB); "
+                    f"max is {MAX_URL_FILE_MB} MB"
+                )
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise ValueError(
+                        f"file_url body exceeded {MAX_URL_FILE_MB} MB while streaming"
+                    )
+                if time.monotonic() > deadline:
+                    raise ValueError(
+                        f"file_url download exceeded the "
+                        f"{MAX_URL_FETCH_SECONDS:.0f}s budget after "
+                        f"{len(buf) / 1024 / 1024:.1f} MB; the server is "
+                        f"sending too slowly to finish"
+                    )
+            return bytes(buf), f"url:{file_url}"

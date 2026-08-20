@@ -102,3 +102,28 @@ def test_a_model_at_the_root_is_found(tmp_path):
     found = debug.find_model_dirs(tmp_path)
     assert len(found) == 1
     assert found[0]["depth"] == 1
+
+
+def test_the_limit_stops_enumeration_rather_than_trimming_the_result(volume, monkeypatch):
+    """Sorting a level before applying the cap means visiting every entry in it
+    first, which is the same unbounded-work mistake one layer down."""
+    hub = volume / "hub"
+    for i in range(200):
+        (hub / f"models--acme--m{i:03d}").mkdir()
+
+    consumed = 0
+    real_glob = Path.glob
+
+    def counting_glob(self, pattern, *args, **kwargs):
+        def gen():
+            nonlocal consumed
+            for item in real_glob(self, pattern, *args, **kwargs):
+                consumed += 1
+                yield item
+        return gen()
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    found = debug.find_model_dirs(volume, limit=5)
+
+    assert len(found) == 5
+    assert consumed < 50, f"enumerated {consumed} entries to return 5"

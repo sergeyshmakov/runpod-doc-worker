@@ -864,3 +864,26 @@ def test_a_prompt_download_is_unaffected(monkeypatch):
     raw, src = _resolve({"file_url": "https://cdn.example.com/quick.pdf"})
     assert raw == b"%PDF-1.4 fine"
     assert src == "url:https://cdn.example.com/quick.pdf"
+
+
+def test_a_stalled_connect_is_bounded_even_though_no_chunk_arrives(monkeypatch):
+    """The in-loop deadline can only fire once a chunk has arrived. A chain of
+    slow redirects, or a connection that never produces a first byte, needs the
+    budget applied around the whole fetch."""
+    async def never_returns(_file_url):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(worker_io, "_fetch_url", never_returns)
+    monkeypatch.setattr(worker_io, "MAX_URL_FETCH_SECONDS", 0.05)
+
+    with pytest.raises(ValueError, match="exceeded the .*budget"):
+        _resolve({"file_url": "https://cdn.example.com/stalls.pdf"})
+
+
+def test_the_outer_budget_does_not_disturb_an_ordinary_fetch(monkeypatch):
+    async def quick(file_url):
+        return b"%PDF-1.4 fine", f"url:{file_url}"
+
+    monkeypatch.setattr(worker_io, "_fetch_url", quick)
+    raw, src = _resolve({"file_url": "https://cdn.example.com/quick.pdf"})
+    assert raw == b"%PDF-1.4 fine"
