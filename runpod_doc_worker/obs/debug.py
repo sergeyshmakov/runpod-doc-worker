@@ -87,9 +87,24 @@ def find_model_dir() -> str | None:
         best = max(matches, key=lambda p: p.stat().st_mtime)
         snapshots = best / "snapshots"
         if snapshots.is_dir():
-            snap_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
-            if snap_dirs:
-                return str(max(snap_dirs, key=lambda p: p.stat().st_mtime))
+            # Bounded like every other listing in this module, and for a
+            # sharper reason: this one runs while building the first successful
+            # response, so an unexpectedly large cache would stall a real job
+            # rather than a diagnostic. The cost is that "most recently used"
+            # becomes "most recently used among the first PROBE_MAX_ENTRIES" —
+            # acceptable for a field that reports which weights a worker
+            # appears to have loaded.
+            # Guarded on its own rather than by the outer handler: failing to
+            # read the snapshots directory says nothing about whether the model
+            # directory was found, and answering `None` would throw away the
+            # part that did work.
+            try:
+                entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
+                snap_dirs = [Path(e.path) for e in entries if _is_dir(e)]
+                if snap_dirs:
+                    return str(max(snap_dirs, key=lambda p: p.stat().st_mtime))
+            except OSError:
+                pass
         return str(best)
     except OSError:
         return None

@@ -385,7 +385,12 @@ def test_a_later_subtree_is_still_searched_after_an_unreadable_one(tmp_path, mon
 
 def test_find_model_dir_survives_an_unreadable_cache(tmp_path, monkeypatch):
     """This runs on the response path of a successful job. An unreadable cache
-    directory must cost the `model_dir` field, not the job."""
+    directory must cost the `model_dir` field, not the job.
+
+    Watches os.scandir, which is what the bounded scan uses — an earlier
+    version stubbed `Path.iterdir` and stopped intercepting anything when the
+    implementation moved.
+    """
     from runpod_doc_worker import config
 
     hub = tmp_path / "hub"
@@ -394,9 +399,18 @@ def test_find_model_dir_survives_an_unreadable_cache(tmp_path, monkeypatch):
     config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
     debug.find_model_dir.cache_clear()
 
-    monkeypatch.setattr(Path, "iterdir", _lazy_iterdir("snapshots"))
+    real_scandir = os.scandir
+
+    def unreadable(path="."):
+        if Path(path).name == "snapshots":
+            raise PermissionError(13, "Permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unreadable)
     try:
-        assert debug.find_model_dir() is None
+        # The model directory is still found; only the snapshot below it is
+        # unreadable, so the field degrades rather than the job failing.
+        assert debug.find_model_dir() == str(hub / "models--acme--parser")
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
@@ -498,3 +512,27 @@ def test_resolve_snapshot_path_stops_at_the_raw_entry_cap(tmp_path, consumed):
 
     debug._resolve_snapshot_path(tmp_path, "acme/parser")
     assert consumed["n"] <= 120, f"read {consumed['n']} of 400 entries"
+
+
+def test_find_model_dir_bounds_its_snapshot_scan(tmp_path, monkeypatch, consumed):
+    """This runs on the success path of a real job. Every other listing in the
+    module is bounded; leaving this one unbounded also means the next reader
+    assumes it is."""
+    from runpod_doc_worker import config
+
+    model = tmp_path / "hub" / "models--acme--parser"
+    snaps = model / "snapshots"
+    snaps.mkdir(parents=True)
+    for i in range(400):
+        (snaps / f"hash{i:03d}").mkdir()
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        result = debug.find_model_dir()
+        assert result is not None
+        assert consumed["n"] <= 120, f"read {consumed['n']} of 400 snapshot entries"
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
