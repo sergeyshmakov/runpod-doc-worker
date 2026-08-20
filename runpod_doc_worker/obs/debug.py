@@ -144,16 +144,12 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
     out["snapshots_dir_exists"] = snapshots_dir.is_dir()
     if out["snapshots_dir_exists"]:
         try:
-            # Bounded like every other listing here: a cache with thousands of
-            # snapshot dirs must not decide how long the diagnostic takes.
-            names = [
-                d.name
-                for d in _islice(
-                    (e for e in snapshots_dir.iterdir() if e.is_dir()),
-                    PROBE_MAX_ENTRIES,
-                )
-            ]
-            out["snapshot_subdirs"] = sorted(names)
+            # Bounded like every other listing here, and bounded on entries
+            # read rather than on subdirectories kept: a cache holding
+            # thousands of stray files must not decide how long the diagnostic
+            # takes just because few of them are directories.
+            entries, _ = _scan(snapshots_dir, PROBE_MAX_ENTRIES)
+            out["snapshot_subdirs"] = sorted(e.name for e in entries if _is_dir(e))
         except OSError as e:
             out["issue"] = f"snapshots/ iter error: {e}"
             return out
@@ -276,6 +272,38 @@ PROBE_MAX_VISITS = 2000
 PROBE_MAX_SNAPSHOTS = 5
 
 
+def _scan(directory: Path, max_entries: int) -> tuple[list[Any], bool]:
+    """Up to ``max_entries`` raw directory entries. Returns ``(entries, more)``.
+
+    Uses ``os.scandir`` rather than ``Path.iterdir`` because it is the only one
+    that is lazy on every interpreter this package supports: ``iterdir`` is a
+    generator through 3.12 and materialises the whole scandir result from 3.13,
+    so slicing it bounds the response and not the work.
+
+    The cap counts entries **read**, before any filtering. Filtering first and
+    slicing after counts only what survives the filter, so a directory holding
+    ten thousand files and three subdirectories is read in full to prove there
+    is no fourth subdirectory.
+    """
+    entries: list[Any] = []
+    more = False
+    with os.scandir(directory) as scan:
+        for entry in scan:
+            if len(entries) >= max_entries:
+                more = True
+                break
+            entries.append(entry)
+    return entries, more
+
+
+def _is_dir(entry: Any) -> bool:
+    """``entry.is_dir()`` without letting a stat failure escape."""
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
 def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] | str:
     """A bounded listing of one directory, for the probe payload.
 
@@ -290,17 +318,19 @@ def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] |
     without a count, because counting them is the walk being avoided.
     """
     try:
-        # One extra tells us something was left behind without enumerating it.
-        entries = list(_islice(p.iterdir(), max_entries + 1))
-    except (PermissionError, FileNotFoundError, OSError) as e:
+        # One extra tells us something was left behind without reading it all.
+        entries, truncated = _scan(p, max_entries + 1)
+    except OSError as e:
         return f"<error: {type(e).__name__}: {e}>"
 
-    truncated = len(entries) > max_entries
+    if len(entries) > max_entries:
+        entries, truncated = entries[:max_entries], True
+
     result: list[str] = []
-    for entry in sorted(entries[:max_entries]):
-        kind = "d" if entry.is_dir() else "f"
+    for entry in sorted(entries, key=lambda e: e.name):
+        kind = "d" if _is_dir(entry) else "f"
         try:
-            size = entry.stat().st_size if entry.is_file() else "-"
+            size = entry.stat().st_size if not _is_dir(entry) else "-"
         except OSError:
             size = "?"
         result.append(f"{kind} {entry.name} {size}")
@@ -310,17 +340,20 @@ def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] |
 
 
 def _snapshot_names(model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS) -> list[str]:
-    """Up to ``limit`` snapshot directory names, without reading past them."""
+    """Up to ``limit`` snapshot directory names, from a bounded read.
+
+    Two caps, because they bound different things: ``PROBE_MAX_ENTRIES`` bounds
+    what is read from the directory, ``limit`` bounds what is reported from it.
+    A snapshots directory full of ordinary files yields fewer than ``limit``
+    names and still stops, where a limit applied after the is-a-directory
+    filter would have read to the end looking for one more.
+    """
     snapshots = model_dir / "snapshots"
     try:
-        return [
-            d.name
-            for d in _islice(
-                (e for e in snapshots.iterdir() if e.is_dir()), limit
-            )
-        ]
+        entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
     except OSError:
         return []
+    return [e.name for e in entries if _is_dir(e)][:limit]
 
 
 def find_model_dirs(
@@ -354,39 +387,41 @@ def find_model_dirs(
         if depth >= max_depth:
             continue
 
+        # os.scandir rather than Path.iterdir: it is the only one that is lazy
+        # on every supported interpreter, so the visit budget below bounds the
+        # work and not just the answer. iterdir is a generator through 3.12 and
+        # materialises the whole directory from 3.13.
+        #
         # The iteration is inside the guard, not just the call that starts it.
-        # Through Python 3.12 `Path.iterdir` is a generator function, so it
-        # returns successfully and raises when advanced — guarding only the
-        # call would catch nothing there, and one unreadable directory would
-        # abort the whole search and discard every model already found. 3.13
-        # scans eagerly, which is why that reads as safe on a modern
-        # interpreter and is not on the ones this package supports.
+        # On the versions where iterdir is lazy the error arrives on advance,
+        # and one unreadable directory would otherwise abort the whole search
+        # and discard every model already found.
         try:
-            for entry in current.iterdir():
-                visits += 1
-                if visits > max_visits:
-                    return found, (
-                        f"search stopped after visiting {max_visits} directory "
-                        f"entries; results are partial"
-                    )
-                try:
-                    if not entry.is_dir():
-                        continue
-                except OSError:
-                    continue
-
-                if entry.name.startswith("models--"):
-                    found.append({
-                        "path": str(entry),
-                        "depth": depth + 1,
-                        "snapshots": _snapshot_names(entry),
-                    })
-                    if len(found) >= limit:
+            with os.scandir(current) as scan:
+                for entry in scan:
+                    visits += 1
+                    if visits > max_visits:
                         return found, (
-                            f"stopped at the {limit}-match limit; there may be more"
+                            f"search stopped after visiting {max_visits} "
+                            f"directory entries; results are partial"
                         )
-                else:
-                    queue.append((entry, depth + 1))
+                    if not _is_dir(entry):
+                        continue
+
+                    path = Path(entry.path)
+                    if entry.name.startswith("models--"):
+                        found.append({
+                            "path": str(path),
+                            "depth": depth + 1,
+                            "snapshots": _snapshot_names(path),
+                        })
+                        if len(found) >= limit:
+                            return found, (
+                                f"stopped at the {limit}-match limit; there may "
+                                f"be more"
+                            )
+                    else:
+                        queue.append((path, depth + 1))
         except OSError:
             # This subtree is unreadable. That costs this subtree; the queue
             # and everything already found survive.

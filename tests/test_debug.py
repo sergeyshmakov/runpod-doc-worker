@@ -7,6 +7,7 @@ the bound that matters is on the traversal, not on the result set.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -55,41 +56,59 @@ def test_a_model_below_the_depth_bound_is_not_reported(volume):
     assert all("buried" not in f["path"] for f in found)
 
 
-def test_the_walk_never_descends_past_the_depth_bound(volume, monkeypatch):
-    """`rglob` descended everything and discarded deep matches afterwards, so
-    the bound described the results and not the work.
+def _record_opened(monkeypatch) -> list[Path]:
+    """Record every directory the search opens, keeping enumeration lazy.
 
-    The earlier version of this test asserted on glob patterns, because
-    pathlib's traversal is not observable from Python. The search walks
-    explicitly now, so the directories it opens can be checked directly — which
-    is what the pattern assertion was standing in for.
+    Must wrap os.scandir, which is what the walk uses. An earlier version of
+    these tests recorded `Path.iterdir`; when the walk moved to os.scandir one
+    of them started passing on an empty list rather than failing, which is the
+    quieter half of the same mistake.
     """
     opened: list[Path] = []
-    real_iterdir = Path.iterdir
+    real_scandir = os.scandir
 
-    def recording(self):
-        opened.append(self)
-        return real_iterdir(self)
+    class _Recording:
+        def __init__(self, path):
+            opened.append(Path(path))
+            self._it = real_scandir(path)
 
-    monkeypatch.setattr(Path, "iterdir", recording)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            try:
+                self._it.close()
+            except Exception:
+                pass
+
+        def __iter__(self):
+            return iter(self._it)
+
+        def close(self):
+            self._it.close()
+
+    monkeypatch.setattr(os, "scandir", lambda path=".": _Recording(path))
+    return opened
+
+
+def test_the_walk_never_descends_past_the_depth_bound(volume, monkeypatch):
+    """`rglob` descended everything and discarded deep matches afterwards, so
+    the bound described the results and not the work."""
+    opened = _record_opened(monkeypatch)
     debug.find_model_dirs(volume, max_depth=4)
 
-    too_deep = [p for p in _traversed(opened, volume) if _depth(p, volume) >= 4]
+    traversed = _traversed(opened, volume)
+    assert traversed, "recorded nothing — the probe is watching the wrong call"
+    too_deep = [p for p in traversed if _depth(p, volume) >= 4]
     assert not too_deep, f"opened a directory past the depth bound: {too_deep[:3]}"
 
 
 def test_the_depth_bound_is_honoured_for_other_values(volume, monkeypatch):
-    opened: list[Path] = []
-    real_iterdir = Path.iterdir
-
-    def recording(self):
-        opened.append(self)
-        return real_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", recording)
+    opened = _record_opened(monkeypatch)
     debug.find_model_dirs(volume, max_depth=2)
 
     depths = [_depth(p, volume) for p in _traversed(opened, volume)]
+    assert depths, "recorded nothing — the probe is watching the wrong call"
     assert max(depths) < 2, f"opened depth {max(depths)} under a bound of 2"
 
 
@@ -396,3 +415,86 @@ def test_find_model_dir_returns_the_snapshot_when_readable(tmp_path, monkeypatch
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
+
+
+# -----------------------------------------------------------------------------
+# Bounded for real, on every supported interpreter
+#
+# `Path.iterdir` is a generator through 3.12 and materialises the whole
+# os.scandir result from 3.13, so `islice` over it bounds nothing on a modern
+# interpreter. These cases wrap the real os.scandir and count what is actually
+# consumed, rather than substituting a lazy stub — a stub is bounded by
+# construction and would report success regardless of what the code does.
+# -----------------------------------------------------------------------------
+
+@pytest.fixture
+def consumed(monkeypatch):
+    """Counts directory entries the code actually pulls from the OS."""
+    counter = {"n": 0}
+    real_scandir = os.scandir
+
+    class _Counting:
+        def __init__(self, path):
+            self._it = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            try:
+                self._it.close()
+            except Exception:
+                pass
+
+        def __iter__(self):
+            for entry in self._it:
+                counter["n"] += 1
+                yield entry
+
+        def close(self):
+            self._it.close()
+
+    monkeypatch.setattr(os, "scandir", lambda path=".": _Counting(path))
+    return counter
+
+
+def test_listing_a_huge_directory_reads_only_what_it_shows(tmp_path, consumed):
+    for i in range(500):
+        (tmp_path / f"f{i:03d}.txt").write_bytes(b"x")
+    listed = debug.list_directory(tmp_path, max_entries=10)
+    assert len(listed) == 11
+    assert consumed["n"] <= 15, f"read {consumed['n']} of 500 entries to show 10"
+
+
+def test_the_visit_budget_bounds_real_enumeration(tmp_path, consumed):
+    for i in range(300):
+        (tmp_path / f"d{i:03d}").mkdir()
+    debug.find_model_dirs(tmp_path, max_visits=20)
+    assert consumed["n"] <= 30, f"read {consumed['n']} of 300 entries under a budget of 20"
+
+
+def test_snapshot_names_stop_at_the_raw_entry_cap(tmp_path, consumed):
+    """islice after a filter counts only what survives it, so a snapshots dir
+    full of ordinary files is scanned in full to prove no more subdirectories
+    exist. The cap has to apply to entries read, not to entries kept."""
+    model = tmp_path / "models--acme--parser"
+    snaps = model / "snapshots"
+    snaps.mkdir(parents=True)
+    (snaps / "hash000").mkdir()
+    for i in range(400):
+        (snaps / f"junk{i:03d}.bin").write_bytes(b"x")
+
+    debug.find_model_dirs(tmp_path)
+    assert consumed["n"] <= 120, f"read {consumed['n']} entries for one snapshot name"
+
+
+def test_resolve_snapshot_path_stops_at_the_raw_entry_cap(tmp_path, consumed):
+    model = tmp_path / "models--acme--parser"
+    snaps = model / "snapshots"
+    snaps.mkdir(parents=True)
+    (snaps / "hash000").mkdir()
+    for i in range(400):
+        (snaps / f"junk{i:03d}.bin").write_bytes(b"x")
+
+    debug._resolve_snapshot_path(tmp_path, "acme/parser")
+    assert consumed["n"] <= 120, f"read {consumed['n']} of 400 entries"
