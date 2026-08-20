@@ -940,3 +940,29 @@ def test_base64_padding_errors_are_reported_as_such():
     encoded = _b64.b64encode(b"%PDF-1.4 hello").decode().rstrip("=")[:-1]
     with pytest.raises(ValueError, match="not valid base64"):
         _resolve({"file_b64": encoded})
+
+
+# -----------------------------------------------------------------------------
+# Legacy numeric host spellings
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("host", ["2130706433", "127.1", "0x7f000001", "0177.0.0.1"])
+def test_a_noncanonical_numeric_host_is_rejected(host):
+    """`ipaddress` treats these as hostnames while resolvers read them as
+    127.0.0.1, so the literal-address check never fired on them. On a proxied
+    request nothing downstream re-checks, because the proxy does the resolving."""
+    with pytest.raises(ValueError, match="dotted-quad"):
+        worker_net.require_http_url(f"http://{host}/doc.pdf", field="file_url")
+
+
+@pytest.mark.parametrize("host", ["example.com", "cdn.example.com", "127.0.0.1", "[::1]"])
+def test_an_ordinary_host_is_unaffected(host):
+    worker_net.require_http_url(f"http://{host}/doc.pdf", field="file_url")
+
+
+def test_the_rejection_survives_a_configured_proxy(monkeypatch):
+    """The proxy path does not use the checked transport, so this has to be
+    refused before the request is handed over."""
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
+    with pytest.raises(ValueError, match="dotted-quad"):
+        _resolve({"file_url": "http://2130706433/doc.pdf"})

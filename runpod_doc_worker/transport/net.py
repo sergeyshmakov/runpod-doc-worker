@@ -70,7 +70,39 @@ def require_http_url(url: str, *, field: str) -> str:
     host = parts.hostname
     if not host:
         raise ValueError(f"{field} has no host: {url!r}")
+    if _is_noncanonical_numeric(host):
+        raise ValueError(
+            f"{field} host {host!r} is a legacy numeric address spelling; "
+            f"write it in dotted-quad form so it means the same thing to this "
+            f"worker as it does to whatever resolves it"
+        )
     return host
+
+
+def _is_noncanonical_numeric(host: str) -> bool:
+    """Whether ``host`` is an IPv4 address written in a form only a resolver reads.
+
+    ``2130706433``, ``127.1``, ``0x7f000001`` and ``0177.0.0.1`` all mean
+    127.0.0.1 to ``inet_aton`` and to most proxies, while ``ipaddress`` refuses
+    them and they therefore arrive here looking like hostnames. That gap
+    matters most on the proxied path, which does not use the checked transport
+    — the proxy does the resolving, so nothing downstream re-examines where the
+    request actually goes.
+
+    Rejected rather than canonicalised: these spellings are never what a
+    document URL wants, and rewriting a caller's host silently is worse than
+    telling them it is ambiguous.
+    """
+    try:
+        ipaddress.ip_address(host)
+        return False          # a canonical address; judged on its own merits
+    except ValueError:
+        pass
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return False          # an ordinary hostname
+    return True
 
 
 def _addresses_for(host: str, port: int | None) -> list[str]:
