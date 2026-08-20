@@ -536,3 +536,43 @@ def test_find_model_dir_bounds_its_snapshot_scan(tmp_path, monkeypatch, consumed
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
+
+
+def test_find_model_dir_bounds_the_hub_scan(tmp_path, monkeypatch, consumed):
+    """The last unbounded enumeration in this module. `hub.glob` read the whole
+    cache before one match was chosen, on the first job's response path."""
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "models--acme--parser" / "snapshots" / "abc").mkdir(parents=True)
+    for i in range(3000):
+        (hub / f"models--other--m{i:04d}").mkdir()
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir() is not None
+        assert consumed["n"] <= debug.PROBE_MAX_VISITS + 60, (
+            f"read {consumed['n']} entries from a 3000-entry cache"
+        )
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_model_globs_still_match_by_name(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    (hub / "models--acme--parser").mkdir(parents=True)
+    (hub / "models--other--thing").mkdir()
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir() == str(hub / "models--acme--parser")
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()

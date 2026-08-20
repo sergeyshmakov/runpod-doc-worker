@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import os
 from collections import deque
+from fnmatch import fnmatch
 from itertools import islice as _islice
 from pathlib import Path
 from typing import Any
@@ -61,9 +62,9 @@ def find_model_dir() -> str | None:
     Matches ``config.model_globs`` against ``$HF_HOME/hub``; a worker that
     declares none gets ``None`` and no directory walk.
 
-    Cached because the model dir doesn't change after worker boot and the
-    rglob over ~/.cache/huggingface/hub is non-trivial on cold cache. The
-    cache is keyed on nothing, so a test that reconfigures the worker calls
+    Cached because the model dir doesn't change after worker boot and reading
+    the cache is non-trivial on a cold or network-backed volume. The cache is
+    keyed on nothing, so a test that reconfigures the worker calls
     ``find_model_dir.cache_clear()`` first.
     """
     globs = _config.active().model_globs
@@ -79,7 +80,16 @@ def find_model_dir() -> str | None:
     # of a successful job — an unreadable cache directory must cost the
     # `model_dir` field, not the job.
     try:
-        matches = [p for glob in globs for p in hub.glob(glob)]
+        # Bounded like everything else that reads a directory here. `hub.glob`
+        # would enumerate the whole cache — and retain every match — before one
+        # was chosen, which on a shared volume is a large read on the first
+        # job's response path. Patterns are matched against entry names, so a
+        # model glob is a name pattern rather than a path pattern.
+        entries, _ = _scan(hub, PROBE_MAX_VISITS)
+        matches = [
+            Path(e.path) for e in entries
+            if any(fnmatch(e.name, glob) for glob in globs)
+        ]
         if not matches:
             return None
         # If multiple model dirs are cached, report the most recently used one
