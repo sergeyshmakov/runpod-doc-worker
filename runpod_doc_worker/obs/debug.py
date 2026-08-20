@@ -73,18 +73,26 @@ def find_model_dir() -> str | None:
     hub = Path(hf_home) / "hub"
     if not hub.is_dir():
         return None
-    matches = [p for glob in globs for p in hub.glob(glob)]
-    if not matches:
+
+    # Every filesystem read here is inside the guard, including the iteration
+    # rather than only the call that starts it. This runs on the response path
+    # of a successful job — an unreadable cache directory must cost the
+    # `model_dir` field, not the job.
+    try:
+        matches = [p for glob in globs for p in hub.glob(glob)]
+        if not matches:
+            return None
+        # If multiple model dirs are cached, report the most recently used one
+        # — that's the one the library most likely resolved to.
+        best = max(matches, key=lambda p: p.stat().st_mtime)
+        snapshots = best / "snapshots"
+        if snapshots.is_dir():
+            snap_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
+            if snap_dirs:
+                return str(max(snap_dirs, key=lambda p: p.stat().st_mtime))
+        return str(best)
+    except OSError:
         return None
-    # If multiple model dirs are cached, report the most recently used one —
-    # that's the one the library most likely resolved to.
-    best = max(matches, key=lambda p: p.stat().st_mtime)
-    snapshots = best / "snapshots"
-    if snapshots.is_dir():
-        snap_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
-        if snap_dirs:
-            return str(max(snap_dirs, key=lambda p: p.stat().st_mtime))
-    return str(best)
 
 
 def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
@@ -345,35 +353,43 @@ def find_model_dirs(
         current, depth = queue.popleft()
         if depth >= max_depth:
             continue
+
+        # The iteration is inside the guard, not just the call that starts it.
+        # Through Python 3.12 `Path.iterdir` is a generator function, so it
+        # returns successfully and raises when advanced — guarding only the
+        # call would catch nothing there, and one unreadable directory would
+        # abort the whole search and discard every model already found. 3.13
+        # scans eagerly, which is why that reads as safe on a modern
+        # interpreter and is not on the ones this package supports.
         try:
-            entries = current.iterdir()
-        except OSError:
-            continue
-
-        for entry in entries:
-            visits += 1
-            if visits > max_visits:
-                return found, (
-                    f"search stopped after visiting {max_visits} directory "
-                    f"entries; results are partial"
-                )
-            try:
-                if not entry.is_dir():
-                    continue
-            except OSError:
-                continue
-
-            if entry.name.startswith("models--"):
-                found.append({
-                    "path": str(entry),
-                    "depth": depth + 1,
-                    "snapshots": _snapshot_names(entry),
-                })
-                if len(found) >= limit:
+            for entry in current.iterdir():
+                visits += 1
+                if visits > max_visits:
                     return found, (
-                        f"stopped at the {limit}-match limit; there may be more"
+                        f"search stopped after visiting {max_visits} directory "
+                        f"entries; results are partial"
                     )
-            else:
-                queue.append((entry, depth + 1))
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+
+                if entry.name.startswith("models--"):
+                    found.append({
+                        "path": str(entry),
+                        "depth": depth + 1,
+                        "snapshots": _snapshot_names(entry),
+                    })
+                    if len(found) >= limit:
+                        return found, (
+                            f"stopped at the {limit}-match limit; there may be more"
+                        )
+                else:
+                    queue.append((entry, depth + 1))
+        except OSError:
+            # This subtree is unreadable. That costs this subtree; the queue
+            # and everything already found survive.
+            continue
 
     return found, None

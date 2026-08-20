@@ -311,3 +311,88 @@ def test_a_genuinely_stale_refs_main_still_says_so(tmp_path):
     (model / "snapshots" / "otherhash").mkdir(parents=True)
     out = debug._resolve_snapshot_path(tmp_path, "acme/parser")
     assert "stale refs/main" in out["issue"]
+
+
+# -----------------------------------------------------------------------------
+# An unreadable subtree costs that subtree, not the search
+# -----------------------------------------------------------------------------
+
+def _lazy_iterdir(broken_name: str):
+    """Mimic pathlib's pre-3.13 `iterdir`: a generator that raises on advance.
+
+    Up to 3.12 `Path.iterdir` is a generator function, so guarding the *call*
+    guards nothing — the OSError surfaces when the loop advances it. 3.13
+    switched to an eager `os.scandir`, which means this fails on the three
+    interpreter versions CI runs and passes on the one used locally. The stub
+    keeps the test honest on both.
+    """
+    real_iterdir = Path.iterdir
+
+    def lazy(self):
+        names = list(real_iterdir(self))
+
+        def gen():
+            if self.name == broken_name:
+                raise PermissionError(13, "Permission denied")
+            yield from names
+
+        return gen()
+
+    return lazy
+
+
+def test_an_unreadable_directory_does_not_abort_the_search(tmp_path, monkeypatch):
+    """A queued directory can vanish or become unreadable between being listed
+    and being walked. Losing that subtree is expected; losing the models found
+    before it, and reporting only an error, is not."""
+    (tmp_path / "a_hub" / "models--acme--parser").mkdir(parents=True)
+    (tmp_path / "z_broken").mkdir()
+
+    monkeypatch.setattr(Path, "iterdir", _lazy_iterdir("z_broken"))
+    found, note = debug.find_model_dirs(tmp_path)
+
+    assert [f["path"] for f in found] == [str(tmp_path / "a_hub" / "models--acme--parser")]
+
+
+def test_a_later_subtree_is_still_searched_after_an_unreadable_one(tmp_path, monkeypatch):
+    (tmp_path / "a_broken").mkdir()
+    (tmp_path / "b_hub" / "models--acme--parser").mkdir(parents=True)
+
+    monkeypatch.setattr(Path, "iterdir", _lazy_iterdir("a_broken"))
+    found, _ = debug.find_model_dirs(tmp_path)
+
+    assert len(found) == 1, "an early unreadable directory suppressed a later match"
+
+
+def test_find_model_dir_survives_an_unreadable_cache(tmp_path, monkeypatch):
+    """This runs on the response path of a successful job. An unreadable cache
+    directory must cost the `model_dir` field, not the job."""
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    (hub / "models--acme--parser" / "snapshots" / "abc").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+
+    monkeypatch.setattr(Path, "iterdir", _lazy_iterdir("snapshots"))
+    try:
+        assert debug.find_model_dir() is None
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_find_model_dir_returns_the_snapshot_when_readable(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    (hub / "models--acme--parser" / "snapshots" / "abc").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir().endswith("abc")
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
