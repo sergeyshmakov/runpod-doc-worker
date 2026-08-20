@@ -28,6 +28,16 @@ from typing import Any, Iterable
 from runpod_doc_worker.contract import artifacts as _artifacts
 
 
+# The ways output can be returned. A worker's own schema is what rejects a bad
+# value at the edge; this is the backstop for anything assembling the entry
+# directly.
+VALID_TRANSPORTS = frozenset({"tarball_b64", "inline", "s3"})
+
+# Entry keys the harness is authoritative for, and an engine's metadata may
+# therefore not overwrite.
+RESERVED_ENTRY_KEYS = frozenset({"basename", "source"})
+
+
 def _build_tarball_bytes(output_dir: Path) -> bytes:
     """Gzip-tar the engine output dir; returns the raw bytes."""
     buf = io.BytesIO()
@@ -40,9 +50,15 @@ def _build_tarball_bytes(output_dir: Path) -> bytes:
 def _build_zip_bytes(output_dir: Path) -> bytes:
     """Zip (DEFLATE) the engine output dir; returns the raw bytes.
 
-    Mirrors the file set of `_build_tarball_bytes` in a `.zip` container — used
-    when a caller requests ``archive_format="zip"``, which is what a client
-    emulating an upstream REST API needs when that API returns a `.zip`.
+    Used when a caller requests ``archive_format="zip"``, which is what a
+    client emulating an upstream REST API needs when that API returns a `.zip`.
+
+    Carries the same *files* as `_build_tarball_bytes` but not the same
+    entries: this walks `rglob("*")` filtered to regular files, so directories
+    get no member of their own and a symlink is stored as the bytes it points
+    at. The tar path adds directory members and stores symlinks as links. Both
+    extract to the same tree of files; only an extractor that inspects entry
+    types can tell them apart.
     """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -210,15 +226,30 @@ def package_results_entry(
     s3 the archive carries the whole output directory regardless (so
     ``formats`` is a no-op on those paths).
 
-    ``metadata`` is merged in ahead of the payload — it is where an engine puts
-    whatever it counts (pages requested, regions found, sheets read). The
-    harness does not interpret it.
+    ``metadata`` is where an engine puts whatever it counts (pages requested,
+    regions found, sheets read). The harness does not interpret it, but it does
+    own ``basename`` and ``source``, so metadata may not claim those keys —
+    silently losing the field that says where a document came from is worse
+    than a loud rejection at the call site.
 
-    ``transport`` is expected to be a member of ``{"tarball_b64", "inline", "s3"}``
-    — the schema validates this upstream. The ``else`` branch falls through to
-    inline rather than raising; callers are responsible for passing a
-    validated value.
+    ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
+    unrecognised value raises: returning a successful entry carrying a
+    different payload than the caller asked for is the kind of wrong that
+    surfaces days later, in someone else's code.
     """
+    if transport not in VALID_TRANSPORTS:
+        raise ValueError(
+            f"transport must be one of {sorted(VALID_TRANSPORTS)}; got {transport!r}"
+        )
+    if metadata:
+        claimed = RESERVED_ENTRY_KEYS & set(metadata)
+        if claimed:
+            raise ValueError(
+                f"metadata may not contain {', '.join(sorted(claimed))} — "
+                f"the harness owns {' and '.join(sorted(RESERVED_ENTRY_KEYS))} "
+                f"on a results entry"
+            )
+
     entry: dict[str, Any] = {
         "basename": basename,
         "source": source,
