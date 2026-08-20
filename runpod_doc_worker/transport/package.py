@@ -25,6 +25,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
 from runpod_doc_worker.obs import logging as _logging
 
@@ -48,23 +49,6 @@ def _refuse_reserved(what: str, keys: set[str]) -> None:
             f"{what} may not contain {', '.join(sorted(claimed))} — the harness "
             f"owns {' and '.join(sorted(RESERVED_ENTRY_KEYS))} on a results entry"
         )
-
-
-def _escapes(output_dir: Path, candidate: Path) -> bool:
-    """Whether ``candidate`` leads outside ``output_dir`` once links are followed.
-
-    An archive is supposed to carry what the engine produced. A symlink in the
-    output pointing elsewhere makes it carry something else instead — the zip
-    builder follows links and stores the target's bytes, so a link to a
-    credential file or another job's artifact would be handed to the caller
-    inside a normal-looking response.
-    """
-    try:
-        root = output_dir.resolve()
-        target = candidate.resolve()
-    except OSError:
-        return True
-    return not (target == root or root in target.parents)
 
 
 def _safe_arcname(name: str) -> bool:
@@ -102,7 +86,7 @@ def _archive_members(output_dir: Path) -> list[Path]:
     for child in sorted(output_dir.rglob("*")):
         if not child.is_file():
             continue
-        if _escapes(output_dir, child):
+        if _paths.escapes(output_dir, child):
             _logging.warning(
                 "archive member points outside the output directory; skipping it",
                 file=child.name,

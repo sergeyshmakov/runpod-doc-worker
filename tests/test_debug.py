@@ -801,3 +801,39 @@ def test_the_model_search_does_not_follow_a_symlink_out_of_the_root(tmp_path):
 
     found, _ = debug.find_model_dirs(root)
     assert found == [], f"traversed out of the root: {found}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges on Windows")
+def test_a_symlinked_model_dir_is_not_reported_as_being_in_the_cache(tmp_path, monkeypatch):
+    """Found by auditing for the class a reviewer raised twice, rather than by
+    being told a third time. The reported path read as though it were inside
+    the cache while resolving elsewhere."""
+    from runpod_doc_worker import config
+
+    (tmp_path / "elsewhere" / "snapshots" / "xyz").mkdir(parents=True)
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "models--acme--parser").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert debug.find_model_dir() is None
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges on Windows")
+def test_a_symlinked_snapshot_is_not_reported_as_resolved(tmp_path):
+    (tmp_path / "elsewhere").mkdir()
+    model = tmp_path / "hub" / "models--acme--parser"
+    (model / "refs").mkdir(parents=True)
+    (model / "refs" / "main").write_text("abc123", encoding="utf-8")
+    (model / "snapshots").mkdir()
+    (model / "snapshots" / "abc123").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    out = debug._resolve_snapshot_path(tmp_path / "hub", "acme/parser")
+    assert out["resolution_method"] != "refs/main"
+    assert "outside snapshots" in str(out["issue"])

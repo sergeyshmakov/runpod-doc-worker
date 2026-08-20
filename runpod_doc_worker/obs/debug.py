@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from runpod_doc_worker import config as _config
+from runpod_doc_worker import paths as _paths
 
 
 def probe_enabled() -> bool:
@@ -92,7 +93,14 @@ def find_model_dir() -> str | None:
             # partially written cache entry, say — is not a candidate, and with
             # a newer mtime it would otherwise have been reported as the loaded
             # model directory.
-            if _is_dir(e) and any(fnmatch(e.name, glob) for glob in globs)
+            # Resolved containment, not just a name match: a symlinked entry
+            # reports a path that reads as though it were inside the cache
+            # while pointing somewhere else, which for the field that says
+            # where the weights are is a wrong answer rather than a missing
+            # one.
+            if _is_dir(e)
+            and any(fnmatch(e.name, glob) for glob in globs)
+            and _paths.within(hub, Path(e.path))
         ]
         if not matches:
             # "Not here" and "not in the part we looked at" are different
@@ -221,6 +229,12 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
             )
             return out
         candidate = snapshots_dir / ref
+        if candidate.is_dir() and not _paths.within(snapshots_dir, candidate):
+            out["issue"] = (
+                f"refs/main names {ref!r}, which resolves outside snapshots/ "
+                f"(a link out of the cache)"
+            )
+            return out
         if candidate.is_dir():
             out["resolved_path"] = str(candidate)
             out["resolution_method"] = "refs/main"

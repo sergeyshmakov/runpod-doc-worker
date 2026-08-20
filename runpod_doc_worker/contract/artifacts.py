@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.obs import logging as _logging
 
 
@@ -92,14 +93,6 @@ def check_basename(basename: str) -> None:
         raise ValueError(f"basename may not be a path traversal; got {basename!r}")
 
 
-def _within(output_dir: Path, candidate: Path) -> bool:
-    """Whether ``candidate`` really sits beneath ``output_dir`` once resolved."""
-    try:
-        root = output_dir.resolve()
-        target = candidate.resolve()
-    except OSError:
-        return False
-    return target == root or root in target.parents
 
 
 # Factories, not values — see the module docstring on why a shared container
@@ -166,7 +159,7 @@ class Artifact:
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
             hits = sorted(p for p in output_dir.glob(expanded) if p.is_file())
-            escapees = [p for p in hits if not _within(output_dir, p)]
+            escapees = [p for p in hits if not _paths.within(output_dir, p)]
             if escapees:
                 raise ValueError(
                     f"artifact {self.key!r}: pattern {pattern!r} matched "
