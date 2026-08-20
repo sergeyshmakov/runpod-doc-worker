@@ -174,12 +174,16 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
     if refs_main.is_file():
         try:
             out["refs_main_content"] = refs_main.read_text(encoding="utf-8").strip()
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             # Kept as the diagnosis rather than written into the field a hash
             # belongs in. Storing the error text there made the resolution
             # branch below report "stale refs/main", replacing a permission or
             # volume error with a wrong answer — in exactly the conditions this
             # probe exists to explain.
+            # OSError and UnicodeDecodeError both, because a cache corrupt
+            # enough to be worth diagnosing is corrupt in both ways — and
+            # UnicodeDecodeError is a ValueError, so an OSError-only guard let
+            # it escape and fail the whole probe job.
             refs_main_unreadable = True
             out["issue"] = f"refs/main could not be read: {type(e).__name__}: {e}"
 
@@ -203,7 +207,20 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
 
     # Resolution attempt 1: refs/main → snapshots/<hash>/
     if out["refs_main_content"] and isinstance(out["refs_main_content"], str):
-        candidate = snapshots_dir / out["refs_main_content"]
+        ref = out["refs_main_content"]
+        # refs/main names one snapshot directory. Anything else is a corrupt
+        # cache, and joining it blindly would follow it out: an absolute path
+        # replaces the base entirely, so `/etc` resolved to `/etc` and, if it
+        # happened to exist, was reported as a successful resolution with no
+        # issue recorded — a wrong answer from the tool whose job is to be
+        # right about this.
+        if ref in (".", "..") or "/" in ref or "\\" in ref or Path(ref).is_absolute():
+            out["issue"] = (
+                f"refs/main does not name a snapshot directory; it contains "
+                f"{ref!r}, which points outside snapshots/"
+            )
+            return out
+        candidate = snapshots_dir / ref
         if candidate.is_dir():
             out["resolved_path"] = str(candidate)
             out["resolution_method"] = "refs/main"
@@ -347,6 +364,14 @@ def _is_dir(entry: Any) -> bool:
         return False
 
 
+def _is_dir_nofollow(entry: Any) -> bool:
+    """``entry.is_dir()`` that refuses to be led out of the tree by a symlink."""
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
+
+
 def _newest(paths: Iterable[Path]) -> Path | None:
     """The most recently modified path, skipping any that cannot be statted.
 
@@ -472,7 +497,14 @@ def find_model_dirs(
                             f"search stopped after visiting {max_visits} "
                             f"directory entries; results are partial"
                         )
-                    if not _is_dir(entry):
+                    # Links are not followed here, unlike everywhere else in
+                    # this module that only reports an entry's type. This loop
+                    # queues what it finds, so following a directory symlink
+                    # would walk out of the root it was given and report models
+                    # that live somewhere else entirely — and a probe that
+                    # answers about a different volume than the one asked about
+                    # is worse than one that answers nothing.
+                    if not _is_dir_nofollow(entry):
                         continue
 
                     path = Path(entry.path)

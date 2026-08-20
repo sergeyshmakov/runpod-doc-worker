@@ -8,6 +8,7 @@ the bound that matters is on the traversal, not on the result set.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -726,3 +727,77 @@ def test_every_candidate_unusable_falls_back_to_no_answer(tmp_path, monkeypatch)
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
+
+
+# -----------------------------------------------------------------------------
+# A corrupt cache is what the probe is for; it must not be what breaks it
+# -----------------------------------------------------------------------------
+
+def test_a_non_utf8_refs_main_is_reported_not_raised(tmp_path):
+    """`UnicodeDecodeError` is a ValueError, not an OSError, so the guard added
+    for unreadable refs/main did not cover an undecodable one — and the probe
+    exists precisely to diagnose corrupt caches."""
+    model = tmp_path / "models--acme--parser"
+    (model / "refs").mkdir(parents=True)
+    (model / "refs" / "main").write_bytes(b"\xff\xfe\x00not utf-8")
+    (model / "snapshots" / "abc").mkdir(parents=True)
+
+    out = debug._resolve_snapshot_path(tmp_path, "acme/parser")
+    assert "could not be read" in str(out["issue"])
+    assert "UnicodeDecodeError" in str(out["issue"])
+    assert out["resolved_path"] is None
+
+
+def test_the_whole_probe_survives_a_corrupt_refs_main(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    (model / "refs").mkdir(parents=True)
+    (model / "refs" / "main").write_bytes(b"\xff\xfe\x00")
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    config.configure(config.WorkerConfig(probe_model_ids=("acme/parser",)))
+    try:
+        out = debug.probe_filesystem()
+        assert out["resolution_attempts"], "the probe returned no attempt at all"
+    finally:
+        config.reset()
+
+
+@pytest.mark.parametrize("ref", ["/etc", "../../..", "sub/deeper", "..", "."])
+def test_a_refs_main_pointing_outside_snapshots_is_refused(tmp_path, ref):
+    """Joining an absolute ref replaces the base entirely, so `/etc` resolved
+    to `/etc` and — if it exists — was reported as a successful resolution with
+    no issue recorded."""
+    model = tmp_path / "models--acme--parser"
+    (model / "refs").mkdir(parents=True)
+    (model / "refs" / "main").write_text(ref, encoding="utf-8")
+    (model / "snapshots" / "abc").mkdir(parents=True)
+
+    out = debug._resolve_snapshot_path(tmp_path, "acme/parser")
+    assert out["resolution_method"] != "refs/main", f"accepted {ref!r}"
+    assert out["issue"] is not None
+
+
+def test_a_normal_refs_main_still_resolves(tmp_path):
+    model = tmp_path / "models--acme--parser"
+    (model / "refs").mkdir(parents=True)
+    (model / "refs" / "main").write_text("abc123", encoding="utf-8")
+    (model / "snapshots" / "abc123").mkdir(parents=True)
+    out = debug._resolve_snapshot_path(tmp_path, "acme/parser")
+    assert out["resolution_method"] == "refs/main"
+    assert out["issue"] is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges on Windows")
+def test_the_model_search_does_not_follow_a_symlink_out_of_the_root(tmp_path):
+    """`entry.is_dir()` follows links, so a directory symlink under the search
+    root queued its target and the probe reported models living elsewhere."""
+    outside = tmp_path / "outside"
+    (outside / "models--acme--elsewhere").mkdir(parents=True)
+    root = tmp_path / "volume"
+    root.mkdir()
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+
+    found, _ = debug.find_model_dirs(root)
+    assert found == [], f"traversed out of the root: {found}"
