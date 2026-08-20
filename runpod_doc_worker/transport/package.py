@@ -90,9 +90,21 @@ def _archive_members(output_dir: Path) -> list[Path]:
 
 
 def _build_tarball_bytes(output_dir: Path) -> bytes:
-    """Gzip-tar the engine output dir; returns the raw bytes."""
+    """Gzip-tar the engine output dir; returns the raw bytes.
+
+    ``dereference=True`` stores the bytes behind a symlink rather than the link
+    itself. Without it a kept link is archived with its original absolute
+    target, so the tarball extracts to a dangling path — or is refused by an
+    extractor that checks — while the zip of the same output carries the file.
+    A caller should get the same artifacts whichever container they asked for.
+
+    Following links is safe here only because `_archive_members` has already
+    dropped every member that resolves outside the output directory. The two
+    belong together: dereferencing an unfiltered list is how the zip path was
+    leaking in the first place.
+    """
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
         for child in _archive_members(output_dir):
             tar.add(child, arcname=child.relative_to(output_dir).as_posix())
     return buf.getvalue()

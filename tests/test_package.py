@@ -315,3 +315,41 @@ def test_a_symlink_staying_inside_the_output_is_kept(tmp_path):
     raw = base64.b64decode(package.package_tarball(out, "zip"))
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
         assert zf.read("cover.png") == b"real"
+
+
+def test_tar_carries_the_bytes_of_an_in_tree_symlink(tmp_path):
+    """A kept symlink must arrive as an artifact, not as a link. tarfile stores
+    the link with its original absolute target, so the tarball extracts to a
+    dangling path — or is rejected by a safe extractor — while the zip of the
+    same output carries the file. Both transports must return the same bytes."""
+    out = tmp_path / "out"
+    (out / "images").mkdir(parents=True)
+    (out / "images" / "fig1.png").write_bytes(b"real bytes")
+    try:
+        (out / "cover.png").symlink_to((out / "images" / "fig1.png").resolve())
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    raw = base64.b64decode(package.package_tarball(out))
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        members = {m.name: m for m in tar.getmembers()}
+        assert not members["cover.png"].issym(), "stored as a link, not an artifact"
+        assert tar.extractfile("cover.png").read() == b"real bytes"
+
+
+def test_both_containers_agree_on_a_symlinked_member(tmp_path):
+    out = tmp_path / "out"
+    (out / "images").mkdir(parents=True)
+    (out / "images" / "fig1.png").write_bytes(b"real bytes")
+    try:
+        (out / "cover.png").symlink_to((out / "images" / "fig1.png").resolve())
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    tar_raw = base64.b64decode(package.package_tarball(out))
+    zip_raw = base64.b64decode(package.package_tarball(out, "zip"))
+    with tarfile.open(fileobj=io.BytesIO(tar_raw), mode="r:gz") as tar:
+        tar_files = {m.name: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+    with zipfile.ZipFile(io.BytesIO(zip_raw)) as zf:
+        zip_files = {n: zf.read(n) for n in zf.namelist()}
+    assert tar_files == zip_files
