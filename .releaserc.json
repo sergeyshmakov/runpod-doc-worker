@@ -1,0 +1,64 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          { "type": "perf",     "release": "patch" },
+          { "type": "refactor", "release": "patch" },
+          { "type": "docs",     "scope": "readme", "release": "patch" },
+          { "type": "build",    "release": false },
+          { "type": "ci",       "release": false },
+          { "type": "test",     "release": false },
+          { "type": "chore",    "release": false },
+          { "type": "style",    "release": false },
+          { "breaking": true,   "release": "major" }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits",
+        "presetConfig": {
+          "types": [
+            { "type": "feat",     "section": "Features" },
+            { "type": "fix",      "section": "Bug Fixes" },
+            { "type": "perf",     "section": "Performance" },
+            { "type": "refactor", "section": "Refactoring" },
+            { "type": "docs",     "section": "Documentation", "hidden": false },
+            { "type": "test",     "hidden": true },
+            { "type": "build",    "section": "Build / Deps",  "hidden": false },
+            { "type": "ci",       "hidden": true },
+            { "type": "chore",    "hidden": true },
+            { "type": "style",    "hidden": true },
+            { "type": "revert",   "section": "Reverts" }
+          ]
+        }
+      }
+    ],
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "python -c \"import re,sys; p='pyproject.toml'; t=open(p,encoding='utf-8').read(); t=re.sub(r'^version\\\\s*=\\\\s*\\\"[^\\\"]+\\\"', 'version = \\\"${nextRelease.version}\\\"', t, count=1, flags=re.MULTILINE); open(p,'w',encoding='utf-8').write(t)\""
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "pyproject.toml"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    "@semantic-release/github"
+  ]
+}

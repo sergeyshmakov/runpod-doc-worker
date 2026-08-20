@@ -1,0 +1,50 @@
+# The engine-agnostic half of a RunPod document-processing worker: input
+# transport, outbound target checks, response packaging, redaction, structured
+# logging and debug probes. Worker repos add an engine and an entry point.
+#
+# Deliberately light on dependencies. `httpx` is the only hard one — it is what
+# `transport.net` builds its checked-target transport on. boto3 is imported
+# inside `package_s3`, so it rides in the `s3` extra; torch is imported inside a
+# try/except in `obs.debug`, so it is not a dependency at all.
+
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "runpod-doc-worker"
+version = "0.0.1"
+description = "Engine-agnostic harness for RunPod serverless document-processing workers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+s3 = [
+    # Only needed by the `s3` transport in runpod_doc_worker.transport.package.
+    "boto3>=1.35",
+]
+otel = [
+    # Consumed by the telemetry module. Pins kept here so worker images and CI
+    # agree on one range.
+    "opentelemetry-api>=1.27,<2",
+    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.27,<2",
+]
+test = [
+    "pytest>=7",
+    "httpx>=0.27",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["runpod_doc_worker"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "runpod_doc_worker/**",
+    "README.md",
+    "pyproject.toml",
+]

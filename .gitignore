@@ -1,0 +1,22 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Node tooling for commitlint + semantic-release.
+# package-lock.json IS committed (CI uses npm ci for reproducibility).
+node_modules/
+npm-debug.log
+.npm/
+yarn.lock
+
+.mcp.json
+.claude
+.serena
+.wolf
+CLAUDE.md
