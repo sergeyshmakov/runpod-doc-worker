@@ -578,3 +578,97 @@ def test_a_directory_matching_a_pattern_is_still_skipped_in_silence(tmp_path, ca
 
     assert out["markdown"] == ""
     assert report.entry() is None
+
+
+# -----------------------------------------------------------------------------
+# What a consuming worker needs to reach
+# -----------------------------------------------------------------------------
+
+def test_a_caller_can_supply_the_report(output_dir, capsys):
+    """A worker that counts degradations should not have to read a response
+    back to find out what it lost. The entry still carries the field."""
+    (output_dir / "doc_blocks.json").write_bytes(b"{not json")
+    report = degraded.Report()
+    entry = _entry(output_dir, report=report)
+    capsys.readouterr()
+
+    assert report.count == 1
+    assert report.entry()["items"][0]["artifact"] == "blocks"
+    assert entry["degraded"] == report.entry()
+
+
+def test_a_supplied_report_sees_archive_losses_too(output_dir, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "runpod_doc_worker.transport.package._safe_arcname", lambda name: False
+    )
+    report = degraded.Report()
+    _entry(output_dir, transport="tarball_b64", report=report)
+    capsys.readouterr()
+
+    assert report.count > 0
+    assert {i["reason"] for i in report.entry()["items"]} == {"unsafe_name"}
+
+
+def test_a_supplied_report_stays_empty_on_an_intact_job(output_dir):
+    report = degraded.Report()
+    entry = _entry(output_dir, report=report)
+
+    assert report.count == 0
+    assert report.entry() is None
+    assert "degraded" not in entry
+
+
+def test_a_report_carried_across_two_entries_accumulates(output_dir, capsys):
+    """One report per job rather than per entry is a legitimate thing to want:
+    a worker packaging several documents counts the job's losses, not each
+    file's."""
+    (output_dir / "doc_blocks.json").write_bytes(b"{not json")
+    report = degraded.Report()
+    _entry(output_dir, report=report)
+    _entry(output_dir, report=report)
+    capsys.readouterr()
+
+    assert report.count == 2
+
+
+def test_a_shared_report_does_not_contaminate_a_later_intact_entry(
+    output_dir, capsys
+):
+    """The supplied report is job-wide, but ``degraded`` is per entry."""
+    blocks = output_dir / "doc_blocks.json"
+    blocks.write_bytes(b"{not json")
+    report = degraded.Report()
+
+    first = _entry(output_dir, report=report)
+    blocks.write_bytes(b'[{"type": "text"}]')
+    second = _entry(output_dir, report=report)
+    capsys.readouterr()
+
+    assert first["degraded"]["count"] == 1
+    assert report.count == 1
+    assert "degraded" not in second
+
+
+def test_a_shared_report_does_not_share_mutable_items_with_an_entry(
+    output_dir, capsys
+):
+    """Consumer edits to an entry must not rewrite the job-wide report."""
+    (output_dir / "doc_blocks.json").write_bytes(b"{not json")
+    report = degraded.Report()
+
+    entry = _entry(output_dir, report=report)
+    capsys.readouterr()
+    entry["degraded"]["items"][0]["artifact"] = "consumer-rewrite"
+
+    assert report.entry()["items"][0]["artifact"] == "blocks"
+
+
+def test_the_log_message_is_public_and_is_what_gets_logged(capsys):
+    """Workers document this string to their operators as the thing to alert
+    on, so it is a contract. A test here is what makes changing it fail
+    something rather than silently going quiet."""
+    degraded.Report().note(reason=degraded.UNREADABLE, file="doc.md")
+    record = json.loads(capsys.readouterr().out.strip())
+
+    assert degraded.MESSAGE == "response degraded"
+    assert record["msg"] == degraded.MESSAGE

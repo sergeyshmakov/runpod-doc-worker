@@ -35,7 +35,14 @@ MAX_INLINE_FILE_MB = 20
 # Derived at call time rather than at import, so it cannot drift from
 # MAX_INLINE_FILE_MB — a monkeypatched or (later) configurable ceiling has to
 # move both numbers together or neither.
-def _max_inline_b64_chars() -> int:
+def max_inline_b64_chars() -> int:
+    """The encoded length at which an inline payload is refused.
+
+    Public because a worker asserting that refusal has to build a string that
+    exceeds it, and the alternative is copying the arithmetic above into a test
+    — where it silently stops describing this function the first time the
+    headroom changes.
+    """
     return int((MAX_INLINE_FILE_MB * 1024 * 1024) / 3 * 4 * 1.05)
 
 # Cap on file_url downloads. Larger than MAX_INLINE_FILE_MB because URL
@@ -195,7 +202,7 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
             ) from None
 
     if file_b64 := job_input.get("file_b64"):
-        if len(file_b64) > _max_inline_b64_chars():
+        if len(file_b64) > max_inline_b64_chars():
             raise ValueError(
                 f"inline file too large (encoded length {len(file_b64)} chars); "
                 f"use file_url or volume_path for files > {MAX_INLINE_FILE_MB} MB"

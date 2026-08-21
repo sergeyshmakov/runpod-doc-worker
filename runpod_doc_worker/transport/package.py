@@ -395,6 +395,7 @@ def package_results_entry(
     manifest: Iterable[_artifacts.Artifact],
     archive_format: str = "tar.gz",
     metadata: dict[str, Any] | None = None,
+    report: _degraded.Report | None = None,
 ) -> dict[str, Any]:
     """Build one entry of the ``results: [...]`` response array.
 
@@ -415,6 +416,11 @@ def package_results_entry(
     it always did. This is the entry point that attaches it, because it is the
     only one that builds something a caller reads. See
     :mod:`runpod_doc_worker.contract.degraded`.
+
+    Pass ``report`` to accumulate that record across a whole job. Each entry
+    still carries only the losses recorded while packaging that entry; the
+    supplied report is what lets a worker count job-wide degradations without
+    reading its responses back, or attach them to the span it already has open.
 
     ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
     unrecognised value raises: returning a successful entry carrying a
@@ -443,33 +449,40 @@ def package_results_entry(
         "source": source,
         **(metadata or {}),
     }
+    aggregate_report = report
     report = _degraded.Report()
-    required_members = (
-        _requirements.select(entries, output_dir, basename, report)
-        if transport != "inline"
-        else {}
-    )
-    if transport == "tarball_b64":
-        entry["tarball_b64"] = package_tarball(
-            output_dir,
-            archive_format,
-            report,
-            _required_members=required_members,
+    try:
+        required_members = (
+            _requirements.select(entries, output_dir, basename, report)
+            if transport != "inline"
+            else {}
         )
-    elif transport == "s3":
-        entry.update(
-            package_s3(
+        if transport == "tarball_b64":
+            entry["tarball_b64"] = package_tarball(
                 output_dir,
-                basename,
                 archive_format,
                 report,
                 _required_members=required_members,
             )
-        )
-    else:  # inline
-        entry.update(
-            package_inline(output_dir, basename, entries, formats=formats, report=report)
-        )
+        elif transport == "s3":
+            entry.update(
+                package_s3(
+                    output_dir,
+                    basename,
+                    archive_format,
+                    report,
+                    _required_members=required_members,
+                )
+            )
+        else:  # inline
+            entry.update(
+                package_inline(
+                    output_dir, basename, entries, formats=formats, report=report
+                )
+            )
+    finally:
+        if aggregate_report is not None:
+            aggregate_report._extend(report)
     # Last, so a manifest or metadata key cannot land on top of it. Both are
     # refused above, but the ordering is what makes that a check rather than
     # the only thing standing between a caller and a response that says it is

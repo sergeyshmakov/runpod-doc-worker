@@ -66,4 +66,12 @@ The worker's handler calls the transport and packaging functions. This package d
 
 The API is pre-release. Pin a tag rather than a branch, then review the [changelog](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/CHANGELOG.md) before changing that tag.
 
+## Know which harness an image is running
+
+`runpod_doc_worker.__version__` reads the installed distribution metadata, so a worker can report the harness it was built against.
+
+<Callout type="warn" title="An editable install does not report a truthful version">
+  `pip install -e` records the metadata that existed when the link was made and does not update it as the source changes. A consumer wired that way can run current code while `__version__` reports whatever it was first linked at. Install from a pinned archive wherever that string matters — a released image, or a test run meant to match one.
+</Callout>
+
 Continue with [worker configuration](/docs/getting-started/configuration/) or [input transport](/docs/guides/inputs/).
