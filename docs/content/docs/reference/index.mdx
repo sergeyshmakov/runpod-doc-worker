@@ -20,6 +20,9 @@ from runpod_doc_worker import WorkerConfig, active, configure, __version__
 
 `DEFAULT_VOLUME_ROOTS` is exported from `runpod_doc_worker.config`.
 
+`WorkerConfig.probe_default` controls filesystem diagnostics when neither probe
+environment override is non-blank. It defaults to `False`.
+
 ## Input transport
 
 From `runpod_doc_worker.transport.io`:
@@ -126,7 +129,8 @@ From `runpod_doc_worker.testing.hub`:
 | --- | --- | --- |
 | `<PREFIX>_VOLUME_ROOTS` | Configured roots | Volume input containment |
 | `<PREFIX>_ALLOW_LOCAL_FETCH` | Disabled | URL target policy |
-| `<PREFIX>_ENABLE_PROBE` | Disabled | Explicit filesystem-diagnostic opt-in |
+| `<PREFIX>_ENABLE_PROBE` | `probe_default` | Canonical probe override; non-blank and authoritative |
+| `<PREFIX>_DISABLE_PROBE` | `probe_default` | Deprecated inverted alias, used only when the canonical override is blank or absent |
 | `LOG_FORMAT` | `json` | Log rendering; set `text` for local output |
 | `LOG_LEVEL` | `info` | Set `debug` to enable debug records |
 | `BUCKET_ENDPOINT_URL` | None | Required S3 endpoint |
