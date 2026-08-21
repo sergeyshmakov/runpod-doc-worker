@@ -57,7 +57,7 @@ The package rejects:
 
 A missing artifact returns its declared or derived default. Unreadable text or JSON also returns the default, and an unreadable `b64map` member is skipped while readable members remain in the result.
 
-Every substitution and every skipped member is recorded in a [degradation report](/docs/guides/packaging/#degraded-responses) as well as logged, so a caller can tell a fallback value apart from an artifact that was genuinely empty. Those two are indistinguishable in the value alone, and at scale the log line is not what anyone reads.
+A default returned because no file matched is the artifact's declared normal absence and does not add a degradation report. A substitution caused by an unreadable or invalid matched file, and every skipped `b64map` member, is recorded in a [degradation report](/docs/guides/packaging/#degraded-responses) as well as logged. Mark the artifact `required` when a no-match result must fail instead of looking like an empty value.
 
 Filtering with `keys` omits other keys completely. It does not emit them with empty values.
 

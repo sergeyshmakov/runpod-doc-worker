@@ -174,10 +174,11 @@ class Artifact:
     :param default: Value when nothing matches. Derived from ``kind`` when not
         given: ``""`` for text, ``{}`` for json and b64map. Copied per read.
     :param required: Whether a response is worth returning without this. The
-        default, False, is the harness's usual trade: substitute, report it
-        under ``degraded``, ship the rest. Set it for the artifact that *is*
-        the job — the one whose empty value makes the whole response
-        pointless — and an absent or unreadable file raises
+        default, False, is the harness's usual trade: use the declared default
+        when nothing matches; substitute and report when a match is unusable;
+        then ship the rest. Set it for the artifact that *is* the job — the one
+        whose empty value makes the whole response pointless — and an absent or
+        unreadable file raises
         :class:`ArtifactError` instead. Single-value kinds only; see
         ``__post_init__`` for why a collection cannot express it.
     """
@@ -461,10 +462,11 @@ def resolve(
     is omitted from the result, not present-as-empty, so a caller asking for
     markdown only does not pay to base64 every image.
 
-    ``report`` collects anything that had to be dropped or substituted on the
-    way. Pass one when the result is going to a caller: without it the drops
-    are still logged, but the response cannot say a value is a fallback rather
-    than a genuinely empty artifact. See
+    ``report`` collects matched files that had to be dropped or substituted on
+    the way. A pattern that simply matches nothing uses its declared default
+    without reporting a degradation. Pass a report when the result is going to
+    a caller: without it the drops are still logged, but the response cannot say
+    a value is a fallback rather than a genuinely empty artifact. See
     :mod:`runpod_doc_worker.contract.degraded`.
     """
     entries = validate(manifest)
