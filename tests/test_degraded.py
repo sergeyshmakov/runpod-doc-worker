@@ -649,6 +649,20 @@ def test_a_shared_report_does_not_contaminate_a_later_intact_entry(
     assert "degraded" not in second
 
 
+def test_a_shared_report_does_not_share_mutable_items_with_an_entry(
+    output_dir, capsys
+):
+    """Consumer edits to an entry must not rewrite the job-wide report."""
+    (output_dir / "doc_blocks.json").write_bytes(b"{not json")
+    report = degraded.Report()
+
+    entry = _entry(output_dir, report=report)
+    capsys.readouterr()
+    entry["degraded"]["items"][0]["artifact"] = "consumer-rewrite"
+
+    assert report.entry()["items"][0]["artifact"] == "blocks"
+
+
 def test_the_log_message_is_public_and_is_what_gets_logged(capsys):
     """Workers document this string to their operators as the thing to alert
     on, so it is a contract. A test here is what makes changing it fail

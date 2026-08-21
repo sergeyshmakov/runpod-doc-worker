@@ -123,12 +123,12 @@ class Report:
         return self._count
 
     def _extend(self, other: Report) -> None:
-        """Accumulate ``other`` without logging its losses a second time."""
+        """Accumulate independent copies without logging losses a second time."""
         if other is self:
             raise ValueError("a degradation report cannot extend itself")
         remaining = MAX_ITEMS - len(self._items)
         if remaining > 0:
-            self._items.extend(other._items[:remaining])
+            self._items.extend(item.copy() for item in other._items[:remaining])
         self._count += other._count
 
     def entry(self) -> dict[str, Any] | None:
