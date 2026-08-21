@@ -28,6 +28,7 @@ From `runpod_doc_worker.transport.io`:
 | --- | --- |
 | `resolve_input_bytes(job_input)` | Async `(bytes, source_label)` tuple |
 | `resolve_volume_file(volume_path)` | Contained, resolved `Path` |
+| `max_inline_b64_chars()` | Encoded length at which a `file_b64` payload is refused |
 | `volume_roots()` | Effective allowed roots |
 | `detect_format(file_bytes)` | `pdf`, `image`, `ooxml`, or `unknown` |
 | `telemetry_source_kind(source_label)` | Bounded source category |
@@ -64,6 +65,7 @@ From `runpod_doc_worker.contract.degraded`:
 | `Report.note(reason=..., file=..., artifact=None, error_type=None)` | Record one loss and log it |
 | `Report.entry()` | The `degraded` value, or `None` when nothing was lost |
 | `Report.count` | Everything noted, including items the report does not list |
+| `MESSAGE` | The stdout warning every loss is logged under. Stable: alert rules and log mirrors match it |
 | `ENTRY_KEY`, `MAX_ITEMS`, `VALID_REASONS` | The response key, the item cap, the reason vocabulary |
 
 Reasons are `unreadable`, `unresolvable`, `outside_output_dir`, and `unsafe_name`.
@@ -74,7 +76,7 @@ From `runpod_doc_worker.transport.package`:
 
 | Function | Purpose |
 | --- | --- |
-| `package_results_entry(...)` | Build one transport-specific result dictionary |
+| `package_results_entry(..., report=None)` | Build one transport-specific result dictionary. Pass a `Report` to keep what it lost |
 | `package_inline(...)` | Resolve selected manifest values |
 | `package_tarball(output_dir, archive_format="tar.gz", report=None)` | Return a base64 archive |
 | `package_s3(output_dir, basename, archive_format="tar.gz", report=None)` | Upload and presign an archive |
