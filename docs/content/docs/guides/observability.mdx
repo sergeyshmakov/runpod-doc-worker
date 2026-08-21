@@ -76,4 +76,27 @@ That is deliberate. Whether a caller may see worker-local paths and declared env
 
 So the worker owns the gate: it names the variable its operators set, picks the default its deployment wants, and calls this function once it has decided. Nothing here can move that out from under it.
 
+### Migrating from 0.4.x
+
+`probe_enabled()` and `WorkerConfig.probe_default` are gone, and `<PREFIX>_ENABLE_PROBE` and `<PREFIX>_DISABLE_PROBE` are no longer read here. A worker that relied on either — including on `probe_filesystem()` raising `PermissionError` — implements the gate itself, keeping whatever variable name its operators already have:
+
+```python
+import os
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _probe_allowed() -> bool:
+    """Whatever this endpoint's operators already set. The name is yours."""
+    return os.environ.get("ACME_DISABLE_PROBE", "").strip().lower() not in _TRUTHY
+
+
+if job_input.get("probe") is True:
+    if not _probe_allowed():
+        raise ValueError("probe is disabled on this endpoint")
+    return {"probe": debug.probe_filesystem()}
+```
+
+Keeping the old variable name is the point: an operator's existing setting keeps meaning what it meant, and it stops being a name a dependency can change.
+
 Use [worker configuration](/docs/getting-started/configuration/) to select cache patterns and probe fields.
