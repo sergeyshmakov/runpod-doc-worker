@@ -94,7 +94,15 @@ def _archive_members(
     report = _degraded.sink(report)
     kept: list[Path] = []
     for child in sorted(output_dir.rglob("*")):
-        if not child.is_file():
+        # Not `is_file()`: it answers False for a loop and for a link to
+        # nothing as readily as for a directory, so filtering on it would leave
+        # those out of the archive without a word — which is what the report
+        # below exists to prevent.
+        what = _paths.kind(child)
+        if what == _paths.DIRECTORY:
+            continue
+        if what == _paths.UNRESOLVABLE:
+            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
             continue
         where = _paths.relation(output_dir, child)
         if where != _paths.INSIDE:

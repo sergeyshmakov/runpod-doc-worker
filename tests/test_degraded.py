@@ -464,3 +464,117 @@ def test_required_with_a_default_is_refused():
 def test_required_defaults_to_off():
     """Every manifest written before this existed keeps its behaviour."""
     assert Artifact("markdown", ("{basename}.md",)).required is False
+
+
+# -----------------------------------------------------------------------------
+# A glob hit the filesystem will not describe
+#
+# `Path.is_file()` answers False for a symlink loop and for a link to nothing —
+# ELOOP and ENOENT are both in pathlib's ignored errnos — which is the same
+# False it gives an ordinary directory. Dropping everything that is not a file
+# therefore drops the broken ones silently, alongside the directories that were
+# meant to be skipped. glob still yields them: its literal selector tests
+# `lexists`, which does not follow the link.
+# -----------------------------------------------------------------------------
+
+def _undescribable(monkeypatch, name: str) -> None:
+    """Make one entry answer False to both type questions, as ELOOP does."""
+    real_is_file, real_is_dir = Path.is_file, Path.is_dir
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: False if self.name == name else real_is_file(self)
+    )
+    monkeypatch.setattr(
+        Path, "is_dir", lambda self: False if self.name == name else real_is_dir(self)
+    )
+
+
+def _loop(directory: Path, name: str) -> None:
+    """A real two-link symlink cycle at ``name``, or skip."""
+    other = directory / f"{name}.cycle"
+    try:
+        (directory / name).symlink_to(other)
+        other.symlink_to(directory / name)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+
+def test_an_artifact_the_filesystem_will_not_describe_is_reported(
+    output_dir, monkeypatch, capsys
+):
+    _undescribable(monkeypatch, "doc.md")
+    entry = _entry(output_dir)
+    capsys.readouterr()
+
+    assert entry["markdown"] == ""
+    (item,) = entry["degraded"]["items"]
+    assert item["artifact"] == "markdown"
+    assert item["reason"] == "unresolvable"
+
+
+def test_a_real_symlink_loop_is_reported(tmp_path, capsys):
+    """The faithful version of the case above, where the platform allows it."""
+    _loop(tmp_path, "doc.md")
+
+    report = degraded.Report()
+    out = resolve(MANIFEST, tmp_path, "doc", keys=["markdown"], report=report)
+    capsys.readouterr()
+
+    assert out["markdown"] == ""
+    assert report.entry() is not None, "a loop was dropped without a word"
+    assert report.entry()["items"][0]["reason"] == "unresolvable"
+
+
+def test_an_archive_member_the_filesystem_will_not_describe_is_reported(
+    output_dir, monkeypatch, capsys
+):
+    _undescribable(monkeypatch, "doc.md")
+    entry = _entry(output_dir, transport="tarball_b64")
+    capsys.readouterr()
+
+    assert entry["degraded"]["items"][0]["file"] == "doc.md"
+    assert entry["degraded"]["items"][0]["reason"] == "unresolvable"
+
+
+def test_a_real_symlink_loop_is_reported_by_the_archive(output_dir, capsys):
+    _loop(output_dir, "loop.md")
+
+    entry = _entry(output_dir, transport="tarball_b64")
+    capsys.readouterr()
+
+    assert "degraded" in entry, "a loop was left out of the archive without a word"
+    assert {i["reason"] for i in entry["degraded"]["items"]} == {"unresolvable"}
+
+
+def test_an_entry_that_cannot_be_stated_at_all_is_reported(
+    output_dir, monkeypatch, capsys
+):
+    """`is_file()` raises rather than answering when the error is not one
+    pathlib ignores — a permission error on the way to the file. That used to
+    leave the exception to escape packaging as a bare OSError."""
+    real_is_file = Path.is_file
+
+    def is_file(self):
+        if self.name == "doc.md":
+            raise PermissionError("Permission denied")
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+    entry = _entry(output_dir)
+    capsys.readouterr()
+
+    assert entry["markdown"] == ""
+    assert entry["degraded"]["items"][0]["reason"] == "unresolvable"
+
+
+def test_a_directory_matching_a_pattern_is_still_skipped_in_silence(tmp_path, capsys):
+    """Only the broken ones are worth reporting. A directory named like an
+    artifact is an ordinary thing an engine does, and reporting it would teach
+    a caller to ignore the field."""
+    (tmp_path / "doc.md").mkdir()
+    report = degraded.Report()
+    out = resolve(MANIFEST, tmp_path, "doc", keys=["markdown"], report=report)
+    capsys.readouterr()
+
+    assert out["markdown"] == ""
+    assert report.entry() is None

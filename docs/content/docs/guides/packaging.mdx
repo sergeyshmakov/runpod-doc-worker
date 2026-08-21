@@ -90,7 +90,7 @@ That trade only works if the caller knows it happened, so anything lost appears 
 | --- | --- |
 | `artifact` | Manifest key this cost the response, or `null` for an archive member, which is not resolved through the manifest |
 | `file` | Filename, never a path — the output directory is a temp path on a worker and means nothing to a caller |
-| `reason` | `unreadable`, `unresolvable`, `outside_output_dir`, or `unsafe_name` |
+| `reason` | `unreadable` (present but could not be read), `unresolvable` (the filesystem would not say what or where it is — a symlink loop, a link to nothing, a permission denial), `outside_output_dir`, or `unsafe_name` |
 | `error_type` | Exception class name, when an exception revealed the problem |
 
 `reason` values are stable and bounded, which makes them usable as a metric label or a branch in a caller's retry logic. Treat a `degraded` entry as a document to requeue: the response is otherwise successful, so nothing else will flag it.

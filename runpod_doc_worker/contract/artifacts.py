@@ -211,9 +211,26 @@ class Artifact:
         found: list[Path] = []
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
-            raw = sorted(p for p in output_dir.glob(expanded) if p.is_file())
             hits: list[Path] = []
-            for p in raw:
+            for p in sorted(output_dir.glob(expanded)):
+                # Asked before the containment check, and not as `is_file()`:
+                # that answers False for a loop and for a link to nothing, the
+                # same False it gives a directory, so filtering on it would drop
+                # the broken ones here — one line before the check that exists
+                # to report them.
+                what = _paths.kind(p)
+                if what == _paths.DIRECTORY:
+                    # An engine writing a directory where an artifact goes is
+                    # ordinary; reporting it would teach a caller to ignore the
+                    # field.
+                    continue
+                if what == _paths.UNRESOLVABLE:
+                    report.note(
+                        reason=_degraded.UNRESOLVABLE,
+                        file=p.name,
+                        artifact=self.key,
+                    )
+                    continue
                 where = _paths.relation(output_dir, p)
                 if where == _paths.OUTSIDE:
                     raise ValueError(

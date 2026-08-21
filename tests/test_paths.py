@@ -74,3 +74,47 @@ def test_volume_file_reports_a_path_that_cannot_resolve(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="volume_path cannot be resolved"):
         worker_io.resolve_volume_file(str(candidate))
+
+
+def test_kind_separates_a_broken_entry_from_a_directory(tmp_path):
+    """`is_file()` answers False for both, which is why asking it directly
+    drops the broken ones in with the ones a caller meant to skip."""
+    a_file = tmp_path / "doc.md"
+    a_file.write_text("body", encoding="utf-8")
+    a_dir = tmp_path / "images"
+    a_dir.mkdir()
+
+    assert paths.kind(a_file) == paths.FILE
+    assert paths.kind(a_dir) == paths.DIRECTORY
+
+    loop, other = tmp_path / "loop.md", tmp_path / "loop.md.cycle"
+    try:
+        loop.symlink_to(other)
+        other.symlink_to(loop)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    assert loop.is_file() is False  # the trap this function exists for
+    assert paths.kind(loop) == paths.UNRESOLVABLE
+
+
+def test_kind_reports_an_entry_it_cannot_stat(tmp_path, monkeypatch):
+    """A permission denial is not in pathlib's ignored errnos, so `is_file()`
+    raises instead of answering. A caller asking about a type should not have
+    to handle that."""
+    target = tmp_path / "doc.md"
+    target.write_text("body", encoding="utf-8")
+
+    def is_dir(self, *args, **kwargs):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    assert paths.kind(target) == paths.UNRESOLVABLE
+
+
+def test_kind_reports_a_link_to_nothing(tmp_path):
+    dangling = tmp_path / "doc.md"
+    try:
+        dangling.symlink_to(tmp_path / "never-written.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    assert paths.kind(dangling) == paths.UNRESOLVABLE
