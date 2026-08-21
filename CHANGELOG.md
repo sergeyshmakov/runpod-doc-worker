@@ -1,3 +1,18 @@
+## [0.5.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.4.0...v0.5.0) (2026-08-21)
+
+### ⚠ BREAKING CHANGES
+
+* **obs:** probe_enabled() and WorkerConfig.probe_default are removed, <PREFIX>_ENABLE_PROBE and <PREFIX>_DISABLE_PROBE are no longer read, and probe_filesystem() no longer raises PermissionError. A worker that wants a gate implements one: it reads whatever variable it documents and calls probe_filesystem() only when it decides to. A worker that had probe_default=True deletes that line and keeps calling the function. The hyphenated token is the spelling git can parse as a trailer, since a trailer token may not contain a space.
+
+### Refactoring
+
+* **obs:** hand probe policy back to the worker ([2392cdb](https://github.com/sergeyshmakov/runpod-doc-worker/commit/2392cdbc4152289933d8c382ca076249837637c7))
+
+### Documentation
+
+* keep the migration gate fail-closed ([9e23b6f](https://github.com/sergeyshmakov/runpod-doc-worker/commit/9e23b6fa0e8377044350727afa5648a80945d6fe))
+* record who owns a worker-specific knob ([f5765c6](https://github.com/sergeyshmakov/runpod-doc-worker/commit/f5765c69392436542437836a54ed78b7f6e9ec1b))
+
 ## [0.4.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.3.1...v0.4.0) (2026-08-21)
 
 ### ⚠ BREAKING CHANGES
