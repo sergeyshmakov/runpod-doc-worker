@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.contract import degraded
+from runpod_doc_worker.contract import artifacts, degraded
 from runpod_doc_worker.contract.artifacts import Artifact, resolve
 from runpod_doc_worker.transport import package
 
@@ -388,3 +388,79 @@ def test_a_manifest_may_not_claim_the_degraded_key(output_dir):
             source="b64",
             manifest=(Artifact(degraded.ENTRY_KEY, ("{basename}.md",)),),
         )
+
+
+# -----------------------------------------------------------------------------
+# required — the artifact a response is pointless without
+# -----------------------------------------------------------------------------
+
+REQUIRED_MANIFEST = (
+    Artifact("markdown", ("{basename}.md",), kind="text", required=True),
+    Artifact("blocks", ("{basename}_blocks.json",), kind="json", default=[]),
+)
+
+
+def test_a_required_artifact_that_is_absent_raises(tmp_path):
+    """Reporting a degradation is the right answer for a part. It is the wrong
+    answer for the whole point of the job."""
+    with pytest.raises(artifacts.ArtifactError, match="required and matched no file"):
+        resolve(REQUIRED_MANIFEST, tmp_path, "doc")
+
+
+def test_a_required_artifact_that_is_unreadable_raises(tmp_path, capsys):
+    (tmp_path / "doc.md").write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(artifacts.ArtifactError, match="could not be read"):
+        resolve(REQUIRED_MANIFEST, tmp_path, "doc")
+    # Still logged: the response will not survive to carry the reason, so the
+    # log line is the only place an operator can read it.
+    assert json.loads(capsys.readouterr().out.strip())["reason"] == "unreadable"
+
+
+def test_the_error_names_the_patterns_it_tried(tmp_path):
+    with pytest.raises(artifacts.ArtifactError, match=r"\{basename\}\.md"):
+        resolve(REQUIRED_MANIFEST, tmp_path, "doc")
+
+
+def test_an_optional_sibling_still_degrades_normally(tmp_path, capsys):
+    """Requiring one artifact must not make the others fatal."""
+    (tmp_path / "doc.md").write_text("# ok\n", encoding="utf-8")
+    (tmp_path / "doc_blocks.json").write_bytes(b"{not json")
+    report = degraded.Report()
+    out = resolve(REQUIRED_MANIFEST, tmp_path, "doc", report=report)
+    capsys.readouterr()
+
+    assert out["markdown"] == "# ok\n"
+    assert out["blocks"] == []
+    assert report.entry()["items"][0]["artifact"] == "blocks"
+
+
+def test_a_required_artifact_is_not_raised_over_when_it_is_filtered_out(tmp_path):
+    """`formats` decides what is read. An artifact nobody asked for cannot be
+    missing from a response it was never going into."""
+    (tmp_path / "doc_blocks.json").write_bytes(b"[]")
+    out = resolve(REQUIRED_MANIFEST, tmp_path, "doc", keys=["blocks"])
+    assert out == {"blocks": []}
+
+
+def test_the_error_type_is_distinct_from_a_declaration_error(tmp_path):
+    """A worker telling its caller "your input was bad" apart from "my engine
+    produced nothing" needs these to be different exceptions."""
+    assert issubclass(artifacts.ArtifactError, RuntimeError)
+    assert not issubclass(artifacts.ArtifactError, ValueError)
+
+
+def test_required_is_refused_on_a_collection():
+    with pytest.raises(ValueError, match="required is for"):
+        Artifact("images", ("images/*",), kind="b64map", required=True)
+
+
+def test_required_with_a_default_is_refused():
+    """The default could never be read, so one of the two is a mistake and the
+    declaration does not say which."""
+    with pytest.raises(ValueError, match="would never be used"):
+        Artifact("markdown", ("{basename}.md",), required=True, default="")
+
+
+def test_required_defaults_to_off():
+    """Every manifest written before this existed keeps its behaviour."""
+    assert Artifact("markdown", ("{basename}.md",)).required is False

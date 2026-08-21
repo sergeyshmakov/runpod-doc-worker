@@ -104,6 +104,18 @@ _DERIVED_DEFAULTS: dict[str, Any] = {
 }
 
 
+class ArtifactError(RuntimeError):
+    """An engine's output could not be turned into a response.
+
+    Separate from the ``ValueError``s this module raises, which mean a manifest
+    is declared wrong — a programmer error, the same on every job until someone
+    fixes it. This one is a condition of one output directory: a file the
+    manifest says the response cannot do without is absent or unreadable on
+    this job and may well be fine on the next. A worker that wants to tell a
+    caller's bad input apart from its own engine's bad output catches this.
+    """
+
+
 @dataclass(frozen=True)
 class Artifact:
     """One response key, and the file(s) behind it.
@@ -114,12 +126,20 @@ class Artifact:
     :param kind: ``text``, ``json`` or ``b64map``.
     :param default: Value when nothing matches. Derived from ``kind`` when not
         given: ``""`` for text, ``{}`` for json and b64map. Copied per read.
+    :param required: Whether a response is worth returning without this. The
+        default, False, is the harness's usual trade: substitute, report it
+        under ``degraded``, ship the rest. Set it for the artifact that *is*
+        the job — the one whose empty value makes the whole response
+        pointless — and an absent or unreadable file raises
+        :class:`ArtifactError` instead. Single-value kinds only; see
+        ``__post_init__`` for why a collection cannot express it.
     """
 
     key: str
     patterns: tuple[str, ...]
     kind: str = TEXT
     default: Any = _UNSET
+    required: bool = False
 
     def __post_init__(self) -> None:
         if not self.key or not isinstance(self.key, str):
@@ -144,6 +164,25 @@ class Artifact:
                     f"artifact {self.key!r}: patterns must be strings; "
                     f"got {type(pattern).__name__}"
                 )
+        if self.required and self.kind == B64MAP:
+            # A collection has no single file to require. "At least one member"
+            # and "every member readable" are different assertions, and neither
+            # is what `required` says elsewhere — so rather than pick one and
+            # surprise whoever assumed the other, refuse it. A per-member
+            # failure stays a degradation.
+            raise ValueError(
+                f"artifact {self.key!r}: required is for {TEXT!r} and {JSON!r} "
+                f"artifacts, which name one file. A {B64MAP!r} collects, so an "
+                f"unreadable member is reported rather than fatal."
+            )
+        if self.required and self.default is not _UNSET:
+            # One of the two is dead code, and which one is not obvious from
+            # the declaration: a required artifact never falls back, so the
+            # default can never be read.
+            raise ValueError(
+                f"artifact {self.key!r}: a required artifact raises rather than "
+                f"falling back, so its default would never be used. Drop one."
+            )
 
     @property
     def missing_value(self) -> Any:
@@ -224,6 +263,12 @@ class Artifact:
         report = _degraded.sink(report)
         hits = self.matches(output_dir, basename, report)
         if not hits:
+            if self.required:
+                raise ArtifactError(
+                    f"artifact {self.key!r} is required and matched no file. "
+                    f"Patterns tried, against basename {basename!r}: "
+                    f"{', '.join(repr(p) for p in self.patterns)}."
+                )
             return self.missing_value
 
         if self.kind == TEXT:
@@ -270,8 +315,19 @@ class Artifact:
     def _unreadable(
         self, path: Path, exc: Exception, report: _degraded.Report
     ) -> Any:
-        """Note, then fall back to this artifact's default."""
+        """Note, then fall back to this artifact's default — or raise.
+
+        The note happens either way. A required artifact fails the job, and the
+        log line saying which file and which error is the same one an operator
+        needs to work out why, so it is not worth skipping on the path where
+        the response will not survive to carry it.
+        """
         self._note_unreadable(path, exc, report)
+        if self.required:
+            raise ArtifactError(
+                f"artifact {self.key!r} is required and {path.name} could not be "
+                f"read: {type(exc).__name__}."
+            ) from exc
         return self.missing_value
 
 
