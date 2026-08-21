@@ -68,8 +68,9 @@ class WorkerConfig:
         A worker whose image bakes files somewhere adds that directory here;
         ``<PREFIX>_VOLUME_ROOTS`` still overrides the whole list at runtime.
     :param model_globs: Glob patterns matched against the effective Hugging
-        Face Hub cache (``HF_HUB_CACHE`` or the cache derived from ``HF_HOME``)
-        by :func:`runpod_doc_worker.obs.debug.find_model_dir` to report which
+        Face Hub cache (``HF_HUB_CACHE``, legacy ``HUGGINGFACE_HUB_CACHE``, or
+        the cache derived from ``HF_HOME``/``XDG_CACHE_HOME``) by
+        :func:`runpod_doc_worker.obs.debug.find_model_dir` to report which
         weights a worker actually loaded. Empty means "do not look".
     :param probe_model_ids: ``org/name`` model ids the probe response resolves
         snapshot paths for, to diagnose a cache that is present but unreadable.

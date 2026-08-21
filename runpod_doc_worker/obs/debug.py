@@ -57,15 +57,20 @@ def collect_gpu_info() -> dict[str, Any]:
 
 def _hub_cache_path() -> Path:
     """The Hub repository cache, using huggingface_hub's environment order."""
+    def expanded(value: str) -> Path:
+        return Path(os.path.expandvars(os.path.expanduser(value)))
+
     if hub_cache := os.environ.get("HF_HUB_CACHE", "").strip():
-        return Path(os.path.expanduser(hub_cache))
+        return expanded(hub_cache)
+    if legacy_cache := os.environ.get("HUGGINGFACE_HUB_CACHE", "").strip():
+        return expanded(legacy_cache)
 
     if hf_home := os.environ.get("HF_HOME", "").strip():
-        home = Path(os.path.expanduser(hf_home))
+        home = expanded(hf_home)
     elif xdg_cache := os.environ.get("XDG_CACHE_HOME", "").strip():
-        home = Path(os.path.expanduser(xdg_cache)) / "huggingface"
+        home = expanded(xdg_cache) / "huggingface"
     else:
-        home = Path(os.path.expanduser("~/.cache/huggingface"))
+        home = expanded("~/.cache/huggingface")
     return home / "hub"
 
 
@@ -141,6 +146,11 @@ def find_model_dir() -> str | None:
         # answer, but it must not take the others down with it.
         best = _newest(matches)
         if best is None:
+            if hub_truncated:
+                return (
+                    f"<no usable match in the first {PROBE_MAX_VISITS} entries "
+                    f"of {hub}; scan truncated>"
+                )
             return None
         partial_scans: list[str] = []
         if hub_truncated:
@@ -225,6 +235,9 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
     refs_main = model_root / "refs" / "main"
     out["refs_main_path"] = str(refs_main)
     refs_main_unreadable = False
+    if not _paths.within(model_root, refs_main):
+        out["issue"] = "refs/main resolves outside the selected model root"
+        return out
     if refs_main.is_file():
         try:
             out["refs_main_content"] = refs_main.read_text(encoding="utf-8").strip()
@@ -283,7 +296,7 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
             )
             return out
         candidate = snapshots_dir / ref
-        if candidate.is_dir() and not _paths.within(snapshots_dir, candidate):
+        if not _paths.within(snapshots_dir, candidate):
             out["issue"] = (
                 f"refs/main names {ref!r}, which resolves outside snapshots/ "
                 f"(a link out of the cache)"
@@ -301,8 +314,20 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
     # Resolution attempt 2: first available snapshot subdir
     if out["snapshot_subdirs"]:
         first = snapshots_dir / out["snapshot_subdirs"][0]
+        if not _paths.within(snapshots_dir, first):
+            out["issue"] = "fallback snapshot resolves outside snapshots/"
+            return out
+        if not first.is_dir():
+            out["issue"] = "fallback snapshot vanished before it could be resolved"
+            return out
         out["resolved_path"] = str(first)
         out["resolution_method"] = "first snapshot subdir (fallback)"
+        if snapshots_truncated:
+            partial = (
+                f"fallback selected from the first {PROBE_MAX_ENTRIES} entries; "
+                "snapshots/ listing was truncated"
+            )
+            out["issue"] = f"{out['issue']}; {partial}" if out["issue"] else partial
         return out
 
     if out["issue"] is None:
@@ -335,6 +360,7 @@ def probe_filesystem() -> dict[str, Any]:
         "env": {
             "HF_HOME": hf_home,
             "HF_HUB_CACHE": os.environ.get("HF_HUB_CACHE", ""),
+            "HUGGINGFACE_HUB_CACHE": os.environ.get("HUGGINGFACE_HUB_CACHE", ""),
             "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", ""),
             "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", ""),
             "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", ""),
@@ -507,8 +533,10 @@ def list_directory(p: Path, max_entries: int = PROBE_MAX_ENTRIES) -> list[str] |
     return result
 
 
-def _snapshot_names(model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS) -> list[str]:
-    """Up to ``limit`` snapshot directory names, from a bounded read.
+def _snapshot_names(
+    model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS
+) -> tuple[list[str], bool]:
+    """Snapshot names and whether the bounded listing omitted any entries.
 
     Two caps, because they bound different things: ``PROBE_MAX_ENTRIES`` bounds
     what is read from the directory, ``limit`` bounds what is reported from it.
@@ -518,12 +546,13 @@ def _snapshot_names(model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS) -> list[s
     """
     snapshots = model_dir / "snapshots"
     if not _paths.within(model_dir, snapshots):
-        return []
+        return [], False
     try:
-        entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
+        entries, truncated = _scan(snapshots, PROBE_MAX_ENTRIES)
     except OSError:
-        return []
-    return [e.name for e in entries if _is_dir_nofollow(e)][:limit]
+        return [], False
+    names = [e.name for e in entries if _is_dir_nofollow(e)]
+    return names[:limit], truncated or len(names) > limit
 
 
 def find_model_dirs(
@@ -587,10 +616,12 @@ def find_model_dirs(
 
                     path = Path(entry.path)
                     if entry.name.startswith("models--"):
+                        snapshots, snapshots_truncated = _snapshot_names(path)
                         found.append({
                             "path": str(path),
                             "depth": depth + 1,
-                            "snapshots": _snapshot_names(path),
+                            "snapshots": snapshots,
+                            "snapshots_truncated": snapshots_truncated,
                         })
                         if len(found) >= limit:
                             return found, (
