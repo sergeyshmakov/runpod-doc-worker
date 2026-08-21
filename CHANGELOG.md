@@ -1,3 +1,9 @@
+## [0.3.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.3.0...v0.3.1) (2026-08-21)
+
+### Refactoring
+
+* **runtime:** tighten input and diagnostic boundaries ([e8ad782](https://github.com/sergeyshmakov/runpod-doc-worker/commit/e8ad782bdc978508f2d252803a8272557a924956))
+
 ## [0.3.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.2.0...v0.3.0) (2026-08-21)
 
 ### Features
