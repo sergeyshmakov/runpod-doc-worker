@@ -1,0 +1,36 @@
+version: 2
+
+# Keep routine dependency maintenance to one consolidated version-update PR.
+multi-ecosystem-groups:
+  monthly-direct-dependencies:
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "chore(deps)"
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "monthly-direct-dependencies"
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/docs"
+    patterns: ["*"]
+    multi-ecosystem-group: "monthly-direct-dependencies"
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "monthly-direct-dependencies"
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 1
