@@ -13,8 +13,9 @@ be the engine and the entry point.
 **Status: pre-release.** The package installs and its input transport, target
 checks, packaging and artifact manifest are covered by tests, but there is no
 handler in it yet — the job envelope, the stage pipeline and the worker
-bootstrap land in following releases. Nothing depends on this yet; the API is
-expected to move.
+bootstrap land in following releases. Worker repositories already consume
+pinned releases, so public behavior evolves through explicit compatibility
+decisions, downstream verification and accurate release notes.
 
 ## Install
 

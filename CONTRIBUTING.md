@@ -58,15 +58,15 @@ Types that **trigger a release**:
 | `refactor:` | patch | `refactor(obs): read the logger name from config` |
 | `revert:` | patch | `revert: revert "feat: zip archive container"` |
 
-Types that **do not** trigger a release: `docs:` (except `docs(readme):`, a patch), `test:`, `build:`, `ci:`, `chore:`, `style:`.
+Types that **do not** trigger a release by themselves: `docs:` (except `docs(readme):`, a patch), `test:`, `build:`, `ci:`, `chore:`, `style:`. Any type marked with `!` and a `BREAKING CHANGE:` footer triggers the breaking-change rule below.
 
-**Do not use `!` or a `BREAKING CHANGE:` footer.** While the package is pre-1.0, major bumps are made deliberately by the maintainer rather than derived from a commit. A change that breaks a consumer is still a `feat:` or `refactor:` — describe the break in the body. `.releaserc.json` maps `breaking` to a **minor** bump rather than leaving the rule out, because commit-analyzer falls back to a default that would take the package to 1.0.0 on one commit.
+**Breaking changes must use `!` and a `BREAKING CHANGE:` footer.** While the package is pre-1.0, `.releaserc.json` deliberately maps a breaking change to a **minor** bump rather than the default major bump. The footer must name the old behavior, the new behavior, and affected consumers; include adoption steps only when the maintainer requires them. Do not classify a renamed environment variable, inverted default, new public exception, or other compatibility break as an ordinary `refactor:` patch.
 
 Commitlint runs on every PR. Preview locally with `npx commitlint --from HEAD~1 --to HEAD --verbose`.
 
 ## Stability
 
-Pre-1.0, and the API is expected to move — worker repos pin a tag rather than a range. Breakage between 0.x releases is documented in `CHANGELOG.md`. There is no deprecation window: a field that changes shape changes outright, and consumers move when they bump the pin.
+Pre-1.0, but already used by worker repositories that pin release tags. Breaking changes require an explicit maintainer decision, a minor release, downstream-consumer verification, accurate release notes, and current contract documentation. Prefer an additive or temporary compatibility path when it materially reduces operational risk; do not assume a pinned dependency makes an undocumented break harmless.
 
 ## Code style
 
