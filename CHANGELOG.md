@@ -1,3 +1,23 @@
+## [0.4.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.3.1...v0.4.0) (2026-08-21)
+
+### ⚠ BREAKING CHANGES
+
+* **config:** Before 0.3.1, filesystem probes were enabled by default,
+<PREFIX>_DISABLE_PROBE controlled them, and direct probe_filesystem() calls were
+not rejected by an internal policy guard. Probes are now disabled by default,
+<PREFIX>_ENABLE_PROBE is authoritative, and disabled direct calls raise
+PermissionError. Version 0.4.0 adds WorkerConfig.probe_default and accepts
+<PREFIX>_DISABLE_PROBE as a deprecated fallback. Unknown non-blank override
+values disable probes.
+
+### Features
+
+* **config:** make filesystem probe policy worker-defined ([db5ff55](https://github.com/sergeyshmakov/runpod-doc-worker/commit/db5ff55c99c4fae0123fa2212ac84526ce2d9cfb))
+
+### Documentation
+
+* **repo:** document consumer compatibility policy ([5c20870](https://github.com/sergeyshmakov/runpod-doc-worker/commit/5c208704917bf359da1e53cd862e9c9f61ff3159))
+
 ## [0.3.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.3.0...v0.3.1) (2026-08-21)
 
 ### Refactoring
