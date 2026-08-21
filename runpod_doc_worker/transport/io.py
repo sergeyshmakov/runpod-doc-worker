@@ -20,6 +20,12 @@ from runpod_doc_worker.config import DEFAULT_VOLUME_ROOTS  # noqa: F401  (re-exp
 from runpod_doc_worker.transport import net as _net
 
 
+# Base64 is an ASCII format. Accept the whitespace ordinary encoders use for
+# wrapping, but remove it in one translation pass rather than splitting into a
+# Python object for every caller-controlled chunk.
+_BASE64_WHITESPACE = str.maketrans("", "", " \t\r\n\v\f")
+
+
 # RunPod's gateway caps payloads at 10 MB (/run) and 20 MB (/runsync). The
 # 20 MB ceiling is the largest a caller can realistically send inline; the
 # handler enforces it defensively but oversized requests are normally
@@ -215,7 +221,7 @@ async def resolve_input_bytes(job_input: dict) -> tuple[bytes, str]:
         # result. Validating without stripping first would be its own bug:
         # encoders wrap base64 across lines, and the ceiling above already
         # assumes they do.
-        compact = "".join(file_b64.split())
+        compact = file_b64.translate(_BASE64_WHITESPACE)
         if not compact:
             # Stripping whitespace is what makes this case possible: `""` is
             # falsy and never reaches here, while `"   "` is truthy, survives

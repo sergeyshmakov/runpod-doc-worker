@@ -756,6 +756,7 @@ def test_the_whole_probe_survives_a_corrupt_refs_main(tmp_path, monkeypatch):
     (model / "refs").mkdir(parents=True)
     (model / "refs" / "main").write_bytes(b"\xff\xfe\x00")
     monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.setenv("WORKER_ENABLE_PROBE", "1")
     config.configure(config.WorkerConfig(probe_model_ids=("acme/parser",)))
     try:
         out = debug.probe_filesystem()
