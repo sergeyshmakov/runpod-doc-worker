@@ -15,13 +15,15 @@ once at boot by the worker's entry point:
         model_globs=("models--acme--parser*",),
         probe_model_ids=("acme/parser-1.0",),
         probe_env_keys=("ACME_MODEL_SOURCE",),
+        probe_default=False,
     ))
 
 ``env_prefix`` is why an existing endpoint keeps working after a worker adopts
-this package: the knobs its operators already set (``<PREFIX>_VOLUME_ROOTS``,
-``<PREFIX>_ALLOW_LOCAL_FETCH``, ``<PREFIX>_ENABLE_PROBE``) keep the spellings
-they were documented under, because the prefix comes from the worker rather than
-from here.
+this package: the knobs its operators already set (``<PREFIX>_VOLUME_ROOTS``
+and ``<PREFIX>_ALLOW_LOCAL_FETCH``) keep the spellings they were documented
+under, because the prefix comes from the worker rather than from here. Probe
+policy is declared by the worker; ``<PREFIX>_ENABLE_PROBE`` overrides it, and
+the former ``<PREFIX>_DISABLE_PROBE`` spelling remains a compatibility alias.
 
 The active config is process-wide state, which is deliberate: the modules that
 read it are called from request paths that would otherwise have to thread a
@@ -75,12 +77,14 @@ class WorkerConfig:
     :param probe_model_ids: ``org/name`` model ids the probe response resolves
         snapshot paths for, to diagnose a cache that is present but unreadable.
     :param probe_env_keys: Extra env var names to include in the probe's env
-        dump, on top of the HuggingFace ones every worker shares. The dump is
-        unavailable unless ``<PREFIX>_ENABLE_PROBE`` is explicitly truthy.
+        dump, on top of the HuggingFace ones every worker shares.
     :param log_mirror: Optional second sink for log records, called as
         ``(level, msg, fields)`` after the stdout line is written. A worker with
         its own telemetry export registers it here; see
         :mod:`runpod_doc_worker.obs.logging`.
+    :param probe_default: Whether filesystem diagnostics are available when no
+        probe environment override is set. Keep the shared default ``False``
+        unless this worker deliberately exposes an operator-restricted probe.
     """
 
     env_prefix: str = "WORKER"
@@ -90,6 +94,7 @@ class WorkerConfig:
     probe_model_ids: tuple[str, ...] = ()
     probe_env_keys: tuple[str, ...] = field(default=())
     log_mirror: Callable[[str, str, dict], None] | None = None
+    probe_default: bool = False
 
     def env_name(self, name: str) -> str:
         """Full env var name for ``name``, for reads and for error messages."""

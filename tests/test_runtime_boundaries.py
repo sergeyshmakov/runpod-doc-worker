@@ -41,6 +41,7 @@ def test_many_short_base64_chunks_keep_peak_allocation_bounded():
 
 def test_the_filesystem_probe_requires_explicit_enablement(monkeypatch):
     monkeypatch.delenv("WORKER_ENABLE_PROBE", raising=False)
+    monkeypatch.delenv("WORKER_DISABLE_PROBE", raising=False)
 
     with pytest.raises(PermissionError, match="WORKER_ENABLE_PROBE"):
         debug.probe_filesystem()

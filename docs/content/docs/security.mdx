@@ -51,7 +51,7 @@ A presigned URL is a bearer credential. Anyone who has it can read the object un
 
 Use `telemetry_source_kind()` instead of logging a raw URL source label. Use `redact.compact()` to remove URL credentials, queries, and fragments from error text, but do not treat it as a general secret scrubber.
 
-`probe_filesystem()` can expose cache paths and selected environment values. Keep diagnostic responses behind an operator-only boundary. The package does not decide who may request them.
+`probe_filesystem()` can expose cache paths and selected environment values. Keep `WorkerConfig.probe_default=False` unless caller access is restricted by the worker or deployment. `<PREFIX>_ENABLE_PROBE` is the canonical operator override; the package still does not authenticate callers or decide who may request the response.
 
 ## Responsibility boundary
 

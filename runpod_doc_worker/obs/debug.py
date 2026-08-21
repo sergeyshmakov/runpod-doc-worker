@@ -1,8 +1,8 @@
 """Debug / observability helpers.
 
 Almost everything here is best-effort — operator tooling that should never
-crash the request path. The probe payload is the big one: when an operator has
-explicitly enabled it and a job has ``probe: true``, the handler returns a
+crash the request path. The probe payload is the big one: when the effective
+worker policy enables it and a job has ``probe: true``, the handler returns a
 filesystem dump of /runpod-volume so we can debug RunPod Cached Models setups
 without shelling into a worker.
 """
@@ -21,15 +21,38 @@ from runpod_doc_worker import config as _config
 from runpod_doc_worker import paths as _paths
 
 
+_PROBE_TRUTHY = frozenset(("1", "true", "yes", "on"))
+_PROBE_FALSEY = frozenset(("0", "false", "no", "off"))
+
+
+def _probe_override(name: str, *, inverted: bool = False) -> bool | None:
+    """Parse one probe override, treating malformed values as disabled."""
+    value = _config.active().env(name).strip().lower()
+    if not value:
+        return None
+    if value in _PROBE_TRUTHY:
+        return not inverted
+    if value in _PROBE_FALSEY:
+        return inverted
+    # An operator typo must not expose worker-local diagnostic data. This is
+    # intentionally fail-closed for both the canonical and compatibility name.
+    return False
+
+
 def probe_enabled() -> bool:
     """Whether this worker answers ``probe: true`` jobs.
 
-    Off by default because the payload contains worker-local paths and selected
-    environment values. An operator explicitly enables it with
-    ``<PREFIX>_ENABLE_PROBE=1`` on an endpoint whose handler also restricts who
-    may request diagnostics.
+    The worker declares the unset policy through ``WorkerConfig.probe_default``.
+    A non-blank ``<PREFIX>_ENABLE_PROBE`` overrides that policy. The former
+    ``<PREFIX>_DISABLE_PROBE`` spelling is accepted, inverted, only when the new
+    override is absent. This keeps deployed settings meaningful while workers
+    migrate to the canonical name.
     """
-    return _config.active().truthy("ENABLE_PROBE")
+    if (enabled := _probe_override("ENABLE_PROBE")) is not None:
+        return enabled
+    if (enabled := _probe_override("DISABLE_PROBE", inverted=True)) is not None:
+        return enabled
+    return _config.active().probe_default
 
 
 def collect_gpu_info() -> dict[str, Any]:
@@ -351,13 +374,14 @@ def probe_filesystem() -> dict[str, Any]:
     aren't finding the model.
 
     Safe to call without the engine installed. Read-only. No network. Refuses
-    to inspect anything unless the active worker explicitly enables probes.
+    to inspect anything unless the active worker policy enables probes.
     """
     if not probe_enabled():
         knob = _config.active().env_name("ENABLE_PROBE")
         raise PermissionError(
-            f"filesystem probe is disabled; set {knob}=1 to enable it for "
-            "operator-authorized diagnostic requests"
+            f"filesystem probe is disabled; set {knob}=1 or configure "
+            "WorkerConfig(probe_default=True) for operator-authorized "
+            "diagnostic requests"
         )
 
     _list = list_directory

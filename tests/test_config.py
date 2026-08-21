@@ -56,8 +56,78 @@ def test_allow_local_fetch_ignores_another_prefix(configured, monkeypatch):
     assert worker_net.allow_local_targets() is False
 
 
-def test_enable_probe_reads_the_configured_prefix(configured, monkeypatch):
+def test_probe_uses_the_worker_default_when_overrides_are_unset(configured):
     assert worker_debug.probe_enabled() is False
+
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    assert worker_debug.probe_enabled() is True
+
+
+def test_probe_default_does_not_shift_the_log_mirror_positional_slot():
+    mirror = lambda level, message, fields: None
+    worker = config.WorkerConfig(
+        "ACME", "acme-worker", config.DEFAULT_VOLUME_ROOTS, (), (), (), mirror,
+    )
+
+    assert worker.log_mirror is mirror
+    assert worker.probe_default is False
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("1", True), ("true", True), ("yes", True), ("on", True),
+    ("0", False), ("false", False), ("no", False), ("off", False),
+    ("maybe", False),
+])
+def test_enable_probe_overrides_the_worker_default(
+    configured, monkeypatch, value, expected,
+):
+    config.configure(
+        config.WorkerConfig(env_prefix=PREFIX, probe_default=not expected)
+    )
+    monkeypatch.setenv(f"{PREFIX}_ENABLE_PROBE", value)
+    assert worker_debug.probe_enabled() is expected
+
+
+def test_blank_enable_probe_falls_back_to_the_worker_default(
+    configured, monkeypatch,
+):
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    monkeypatch.setenv(f"{PREFIX}_ENABLE_PROBE", "  ")
+    assert worker_debug.probe_enabled() is True
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("1", False), ("true", False), ("yes", False), ("on", False),
+    ("0", True), ("false", True), ("no", True), ("off", True),
+])
+def test_legacy_disable_probe_remains_an_inverted_alias(
+    configured, monkeypatch, value, expected,
+):
+    monkeypatch.setenv(f"{PREFIX}_DISABLE_PROBE", value)
+    assert worker_debug.probe_enabled() is expected
+
+
+def test_invalid_legacy_disable_probe_fails_closed(
+    configured, monkeypatch,
+):
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    monkeypatch.setenv(f"{PREFIX}_DISABLE_PROBE", "maybe")
+    assert worker_debug.probe_enabled() is False
+
+
+@pytest.mark.parametrize("enable,disable,expected", [
+    ("1", "1", True),
+    ("0", "0", False),
+])
+def test_enable_probe_wins_when_both_names_are_set(
+    configured, monkeypatch, enable, disable, expected,
+):
+    monkeypatch.setenv(f"{PREFIX}_ENABLE_PROBE", enable)
+    monkeypatch.setenv(f"{PREFIX}_DISABLE_PROBE", disable)
+    assert worker_debug.probe_enabled() is expected
+
+
+def test_enable_probe_reads_the_configured_prefix(configured, monkeypatch):
     monkeypatch.setenv(f"{PREFIX}_ENABLE_PROBE", "1")
     assert worker_debug.probe_enabled() is True
 
@@ -67,8 +137,39 @@ def test_enable_probe_ignores_another_prefix(configured, monkeypatch):
     assert worker_debug.probe_enabled() is False
 
 
+def test_legacy_disable_probe_ignores_another_prefix(configured, monkeypatch):
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    monkeypatch.setenv("WORKER_DISABLE_PROBE", "1")
+    assert worker_debug.probe_enabled() is True
+
+
+def test_probe_default_allows_a_direct_filesystem_probe(
+    configured, monkeypatch,
+):
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    monkeypatch.delenv(f"{PREFIX}_ENABLE_PROBE", raising=False)
+    monkeypatch.delenv(f"{PREFIX}_DISABLE_PROBE", raising=False)
+
+    assert "paths" in worker_debug.probe_filesystem()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("ENABLE_PROBE", "0"),
+    ("DISABLE_PROBE", "1"),
+])
+def test_operator_override_blocks_a_direct_filesystem_probe(
+    configured, monkeypatch, name, value,
+):
+    config.configure(config.WorkerConfig(env_prefix=PREFIX, probe_default=True))
+    monkeypatch.setenv(f"{PREFIX}_{name}", value)
+
+    with pytest.raises(PermissionError, match=f"{PREFIX}_ENABLE_PROBE"):
+        worker_debug.probe_filesystem()
+
+
 def test_probe_refusal_names_the_configured_prefix(configured, monkeypatch):
     monkeypatch.delenv(f"{PREFIX}_ENABLE_PROBE", raising=False)
+    monkeypatch.delenv(f"{PREFIX}_DISABLE_PROBE", raising=False)
 
     with pytest.raises(PermissionError, match=f"{PREFIX}_ENABLE_PROBE"):
         worker_debug.probe_filesystem()

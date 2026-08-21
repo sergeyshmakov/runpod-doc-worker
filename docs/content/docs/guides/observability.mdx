@@ -62,7 +62,7 @@ if debug.probe_enabled() and caller_is_operator:
 
 `find_model_dir()` searches the effective Hugging Face Hub cache using `model_globs`. It reports a recent matching cache directory, not proof of which model weights handled a job.
 
-`probe_filesystem()` performs bounded, read-only, network-free scans. It raises `PermissionError` unless `<PREFIX>_ENABLE_PROBE` is truthy. Results can include partial-scan markers when a limit is reached.
+`probe_filesystem()` performs bounded, read-only, network-free scans. It raises `PermissionError` unless the effective worker policy enables probes. Results can include partial-scan markers when a limit is reached.
 
 <Callout type="warn" title="Keep diagnostics behind an operator boundary">
   Filesystem diagnostics expose cache paths and selected environment values. Do not return them to untrusted callers.
@@ -70,6 +70,8 @@ if debug.probe_enabled() and caller_is_operator:
 
 ## Compose probe handling yourself
 
-`probe_enabled()` reads `<PREFIX>_ENABLE_PROBE`, which is disabled by default. The package also enforces that switch inside `probe_filesystem()`, but it does not inspect `{"probe": true}`, authenticate callers, or create a probe response. A consumer handler must still decide who may request diagnostics.
+`probe_enabled()` first reads a non-blank `<PREFIX>_ENABLE_PROBE`, then the deprecated inverted `<PREFIX>_DISABLE_PROBE` alias, and finally `WorkerConfig.probe_default`. The new name wins when both names are set. The shared default is disabled, but a worker can deliberately preserve an enabled default with `probe_default=True`.
+
+The package also enforces the effective policy inside `probe_filesystem()`, but it does not inspect `{"probe": true}`, authenticate callers, or create a probe response. A consumer handler must still decide who may request diagnostics. Direct callers must check `probe_enabled()` or handle `PermissionError`.
 
 Use [worker configuration](/docs/getting-started/configuration/) to select cache patterns and probe fields.
