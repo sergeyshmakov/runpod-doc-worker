@@ -21,40 +21,6 @@ from runpod_doc_worker import config as _config
 from runpod_doc_worker import paths as _paths
 
 
-_PROBE_TRUTHY = frozenset(("1", "true", "yes", "on"))
-_PROBE_FALSEY = frozenset(("0", "false", "no", "off"))
-
-
-def _probe_override(name: str, *, inverted: bool = False) -> bool | None:
-    """Parse one probe override, treating malformed values as disabled."""
-    value = _config.active().env(name).strip().lower()
-    if not value:
-        return None
-    if value in _PROBE_TRUTHY:
-        return not inverted
-    if value in _PROBE_FALSEY:
-        return inverted
-    # An operator typo must not expose worker-local diagnostic data. This is
-    # intentionally fail-closed for both the canonical and compatibility name.
-    return False
-
-
-def probe_enabled() -> bool:
-    """Whether this worker answers ``probe: true`` jobs.
-
-    The worker declares the unset policy through ``WorkerConfig.probe_default``.
-    A non-blank ``<PREFIX>_ENABLE_PROBE`` overrides that policy. The former
-    ``<PREFIX>_DISABLE_PROBE`` spelling is accepted, inverted, only when the new
-    override is absent. This keeps deployed settings meaningful while workers
-    migrate to the canonical name.
-    """
-    if (enabled := _probe_override("ENABLE_PROBE")) is not None:
-        return enabled
-    if (enabled := _probe_override("DISABLE_PROBE", inverted=True)) is not None:
-        return enabled
-    return _config.active().probe_default
-
-
 def collect_gpu_info() -> dict[str, Any]:
     """Best-effort GPU inventory for the response's `debug` block.
 
@@ -373,17 +339,17 @@ def probe_filesystem() -> dict[str, Any]:
     LocalEntryNotFoundError on workers that have Cached Models configured but
     aren't finding the model.
 
-    Safe to call without the engine installed. Read-only. No network. Refuses
-    to inspect anything unless the active worker policy enables probes.
-    """
-    if not probe_enabled():
-        knob = _config.active().env_name("ENABLE_PROBE")
-        raise PermissionError(
-            f"filesystem probe is disabled; set {knob}=1 or configure "
-            "WorkerConfig(probe_default=True) for operator-authorized "
-            "diagnostic requests"
-        )
+    Safe to call without the engine installed. Read-only. No network.
 
+    **Whether a caller may ask for this is the worker's decision, and this
+    function does not make it.** The payload names worker-local paths and the
+    env values a worker declared as diagnostic, so a worker that serves callers
+    who should not see either gates the call itself — it knows who its callers
+    are and this package cannot. That gate used to live here, read env vars
+    this package named, and the naming and default of those vars then changed
+    twice in two releases while the only thing anyone actually wanted was to
+    decide for themselves.
+    """
     _list = list_directory
 
     hf_home = os.environ.get("HF_HOME", "")

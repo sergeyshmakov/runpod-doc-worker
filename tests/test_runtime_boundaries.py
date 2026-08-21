@@ -39,9 +39,12 @@ def test_many_short_base64_chunks_keep_peak_allocation_bounded():
     assert peak < len(payload) * 4
 
 
-def test_the_filesystem_probe_requires_explicit_enablement(monkeypatch):
+def test_the_filesystem_probe_is_the_callers_to_authorize(monkeypatch):
+    """It answers when called, because deciding who may call it needs to know
+    who the callers are. A worker knows; a package its worker depends on does
+    not, and the two releases it spent guessing moved an operator-facing knob's
+    name and default underneath a deployed endpoint."""
     monkeypatch.delenv("WORKER_ENABLE_PROBE", raising=False)
     monkeypatch.delenv("WORKER_DISABLE_PROBE", raising=False)
 
-    with pytest.raises(PermissionError, match="WORKER_ENABLE_PROBE"):
-        debug.probe_filesystem()
+    assert isinstance(debug.probe_filesystem(), dict)

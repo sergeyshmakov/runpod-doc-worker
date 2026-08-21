@@ -15,15 +15,19 @@ once at boot by the worker's entry point:
         model_globs=("models--acme--parser*",),
         probe_model_ids=("acme/parser-1.0",),
         probe_env_keys=("ACME_MODEL_SOURCE",),
-        probe_default=False,
     ))
 
 ``env_prefix`` is why an existing endpoint keeps working after a worker adopts
 this package: the knobs its operators already set (``<PREFIX>_VOLUME_ROOTS``
 and ``<PREFIX>_ALLOW_LOCAL_FETCH``) keep the spellings they were documented
-under, because the prefix comes from the worker rather than from here. Probe
-policy is declared by the worker; ``<PREFIX>_ENABLE_PROBE`` overrides it, and
-the former ``<PREFIX>_DISABLE_PROBE`` spelling remains a compatibility alias.
+under, because the prefix comes from the worker rather than from here.
+
+Nothing here decides who may ask a worker for diagnostics. This package once
+read a probe env var of its own naming, which meant the name and the default of
+an operator-facing knob were set by a dependency rather than by the endpoint
+serving the callers — and both then changed twice in two releases.
+:func:`runpod_doc_worker.obs.debug.probe_filesystem` is a function a worker
+calls when it has decided to, under whatever knob it documents.
 
 The active config is process-wide state, which is deliberate: the modules that
 read it are called from request paths that would otherwise have to thread a
@@ -82,9 +86,6 @@ class WorkerConfig:
         ``(level, msg, fields)`` after the stdout line is written. A worker with
         its own telemetry export registers it here; see
         :mod:`runpod_doc_worker.obs.logging`.
-    :param probe_default: Whether filesystem diagnostics are available when no
-        probe environment override is set. Keep the shared default ``False``
-        unless this worker deliberately exposes an operator-restricted probe.
     """
 
     env_prefix: str = "WORKER"
@@ -94,7 +95,6 @@ class WorkerConfig:
     probe_model_ids: tuple[str, ...] = ()
     probe_env_keys: tuple[str, ...] = field(default=())
     log_mirror: Callable[[str, str, dict], None] | None = None
-    probe_default: bool = False
 
     def env_name(self, name: str) -> str:
         """Full env var name for ``name``, for reads and for error messages."""

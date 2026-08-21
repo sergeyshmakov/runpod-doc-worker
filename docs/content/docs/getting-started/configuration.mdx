@@ -17,7 +17,6 @@ configure(
         model_globs=("models--acme--parser*",),
         probe_model_ids=("acme/parser-1.0",),
         probe_env_keys=("ACME_MODEL_SOURCE",),
-        probe_default=False,
     )
 )
 ```
@@ -33,7 +32,6 @@ configure(
 | `probe_model_ids` | `()` | Model IDs whose snapshots diagnostics should resolve |
 | `probe_env_keys` | `()` | Extra environment names and values included in probe output |
 | `log_mirror` | `None` | Optional callback that receives each log record after stdout |
-| `probe_default` | `False` | Worker policy used when no probe environment override is set |
 
 ## Prefixed environment variables
 
@@ -43,18 +41,14 @@ With `env_prefix="ACME"`, the package reads:
 | --- | --- |
 | `ACME_VOLUME_ROOTS` | Comma-separated absolute paths that replace `volume_roots` |
 | `ACME_ALLOW_LOCAL_FETCH` | Allows URL targets that are not publicly routable |
-| `ACME_ENABLE_PROBE` | Overrides `probe_default`; a truthy value enables diagnostics and a non-blank non-truthy value disables them |
-| `ACME_DISABLE_PROBE` | Deprecated compatibility alias, inverted and read only when `ACME_ENABLE_PROBE` is blank or absent |
 
 Truthy values are `1`, `true`, `yes`, and `on`; falsey values are `0`, `false`,
 `no`, and `off`, without case sensitivity. Blank values mean "no override."
-An unrecognized non-blank probe value disables diagnostics rather than risking
-exposure. If both probe variables are non-blank, `ACME_ENABLE_PROBE` wins.
 
 `LOG_*`, `BUCKET_*`, proxy, and Hugging Face variables do not use `env_prefix`.
 
 <Callout type="warn" title="Probe output contains values">
-  Only add non-secret names to `probe_env_keys`. Filesystem diagnostics return the current values of those variables. Keep `probe_default=False` unless caller access is restricted by the handler or deployment.
+  Only add non-secret names to `probe_env_keys`. Filesystem diagnostics return the current values of those variables, and this package does not decide who may request them — gate `probe_filesystem()` behind whatever operator control your worker documents.
 </Callout>
 
 ## Runtime volume override
