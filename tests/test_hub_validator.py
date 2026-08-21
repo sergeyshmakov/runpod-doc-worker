@@ -131,6 +131,14 @@ def test_explicit_roots_override_the_active_config(tmp_path):
     hub.check_test_inputs(path, roots=("/opt/acme",))
 
 
+def test_noncanonical_input_roots_match_runtime_resolution(tmp_path):
+    spec = {"tests": [{"input": {"volume_path": "/runpod-volume/fixture.pdf"}}]}
+    path = tmp_path / "tests.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+
+    hub.check_test_inputs(path, roots=("/runpod-volume/cache/..",))
+
+
 def test_a_spec_with_no_tests_key_is_rejected(tmp_path):
     """A validator that reports clean on a file that lost its contents is
     worse than no validator."""

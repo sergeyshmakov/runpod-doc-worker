@@ -117,7 +117,7 @@ def check_test_inputs(path: str | Path, roots: Iterable[str] | None = None) -> N
             f"{p.name} has no 'tests' key — the Hub validator would run nothing"
         )
     allowed = [
-        PurePosixPath(r)
+        PurePosixPath(posixpath.normpath(r))
         for r in (roots if roots is not None else _config.active().volume_roots)
     ]
 
