@@ -132,6 +132,91 @@ def test_find_model_dir_marks_a_candidate_from_a_truncated_snapshot_scan(
         config.reset()
 
 
+def test_find_model_dir_does_not_scan_a_snapshots_directory_outside_the_model(
+    tmp_path, monkeypatch
+):
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    snapshots = model / "snapshots"
+    (snapshots / "abc123").mkdir(parents=True)
+
+    real_within = debug._paths.within
+    real_scan = debug._scan
+
+    def snapshots_escape(root: Path, candidate: Path) -> bool:
+        if root == model and candidate == snapshots:
+            return False
+        return real_within(root, candidate)
+
+    def refuse_external_scan(directory, max_entries):
+        if directory == snapshots:
+            raise AssertionError("scanned a snapshots directory outside the model")
+        return real_scan(directory, max_entries)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    monkeypatch.setattr(debug._paths, "within", snapshots_escape)
+    monkeypatch.setattr(debug, "_scan", refuse_external_scan)
+    debug.find_model_dir.cache_clear()
+    try:
+        result = debug.find_model_dir()
+        assert str(model) in result
+        assert "outside" in result
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_probe_readers_reject_a_snapshots_directory_outside_the_model(
+    tmp_path, monkeypatch
+):
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    snapshots = model / "snapshots"
+    (snapshots / "abc123").mkdir(parents=True)
+
+    real_within = debug._paths.within
+
+    def snapshots_escape(root: Path, candidate: Path) -> bool:
+        if root == model and candidate == snapshots:
+            return False
+        return real_within(root, candidate)
+
+    monkeypatch.setattr(debug._paths, "within", snapshots_escape)
+
+    resolved = debug._resolve_snapshot_path(hub, "acme/parser")
+    assert resolved["resolved_path"] is None
+    assert resolved["snapshot_subdirs"] == []
+    assert "outside" in str(resolved["issue"])
+    assert debug._snapshot_names(model) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges on Windows")
+def test_every_probe_reader_rejects_a_symlinked_snapshots_directory(
+    tmp_path, monkeypatch
+):
+    outside = tmp_path / "outside"
+    (outside / "abc123").mkdir(parents=True)
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    model.mkdir(parents=True)
+    (model / "snapshots").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    debug.find_model_dir.cache_clear()
+    try:
+        assert "outside" in debug.find_model_dir()
+        resolved = debug._resolve_snapshot_path(hub, "acme/parser")
+        assert "outside" in str(resolved["issue"])
+        assert debug._snapshot_names(model) == []
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
 def test_hf_hub_cache_overrides_hf_home_for_finding_and_probing(tmp_path, monkeypatch):
     hub = tmp_path / "direct-hub-cache"
     snapshot = hub / "models--acme--parser" / "snapshots" / "abc123"

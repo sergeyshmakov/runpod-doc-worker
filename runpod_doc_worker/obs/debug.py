@@ -148,6 +148,11 @@ def find_model_dir() -> str | None:
                 f"Hub listing truncated after {PROBE_MAX_VISITS} entries"
             )
         snapshots = best / "snapshots"
+        if not _paths.within(best, snapshots):
+            return (
+                f"<invalid cache; model candidate={best}; snapshots directory "
+                "resolves outside the model>"
+            )
         if snapshots.is_dir():
             # Bounded like every other listing in this module, and for a
             # sharper reason: this one runs while building the first successful
@@ -238,6 +243,9 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
 
     snapshots_dir = model_root / "snapshots"
     snapshots_truncated = False
+    if not _paths.within(model_root, snapshots_dir):
+        out["issue"] = "snapshots/ resolves outside the selected model root"
+        return out
     out["snapshots_dir_exists"] = snapshots_dir.is_dir()
     if out["snapshots_dir_exists"]:
         try:
@@ -509,11 +517,13 @@ def _snapshot_names(model_dir: Path, limit: int = PROBE_MAX_SNAPSHOTS) -> list[s
     filter would have read to the end looking for one more.
     """
     snapshots = model_dir / "snapshots"
+    if not _paths.within(model_dir, snapshots):
+        return []
     try:
         entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
     except OSError:
         return []
-    return [e.name for e in entries if _is_dir(e)][:limit]
+    return [e.name for e in entries if _is_dir_nofollow(e)][:limit]
 
 
 def find_model_dirs(
