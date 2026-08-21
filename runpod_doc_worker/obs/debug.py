@@ -136,7 +136,12 @@ def find_model_dir() -> str | None:
             # part that did work.
             try:
                 entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
-                newest = _newest(Path(e.path) for e in entries if _is_dir(e))
+                # This path is returned as the model actually loaded. Do not
+                # let a directory symlink make a path outside the selected
+                # cache look like one of its snapshots.
+                newest = _newest(
+                    Path(e.path) for e in entries if _is_dir_nofollow(e)
+                )
                 if newest is not None:
                     return str(newest)
             except OSError:
@@ -196,6 +201,7 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
             out["issue"] = f"refs/main could not be read: {type(e).__name__}: {e}"
 
     snapshots_dir = model_root / "snapshots"
+    snapshots_truncated = False
     out["snapshots_dir_exists"] = snapshots_dir.is_dir()
     if out["snapshots_dir_exists"]:
         try:
@@ -203,8 +209,12 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
             # read rather than on subdirectories kept: a cache holding
             # thousands of stray files must not decide how long the diagnostic
             # takes just because few of them are directories.
-            entries, _ = _scan(snapshots_dir, PROBE_MAX_ENTRIES)
-            out["snapshot_subdirs"] = sorted(e.name for e in entries if _is_dir(e))
+            entries, snapshots_truncated = _scan(
+                snapshots_dir, PROBE_MAX_ENTRIES
+            )
+            out["snapshot_subdirs"] = sorted(
+                e.name for e in entries if _is_dir_nofollow(e)
+            )
         except OSError as e:
             out["issue"] = f"snapshots/ iter error: {e}"
             return out
@@ -252,7 +262,13 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
         return out
 
     if out["issue"] is None:
-        out["issue"] = "no snapshots/ subdir or no entries inside it"
+        if snapshots_truncated:
+            out["issue"] = (
+                f"no snapshot directory found in the first {PROBE_MAX_ENTRIES} "
+                "entries; snapshots/ listing was truncated"
+            )
+        else:
+            out["issue"] = "no snapshots/ subdir or no entries inside it"
     return out
 
 

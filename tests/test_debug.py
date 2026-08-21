@@ -516,6 +516,25 @@ def test_resolve_snapshot_path_stops_at_the_raw_entry_cap(tmp_path, consumed):
     assert consumed["n"] <= 120, f"read {consumed['n']} of 400 entries"
 
 
+def test_resolve_snapshot_path_reports_a_truncated_fallback_scan(tmp_path, monkeypatch):
+    model = tmp_path / "models--acme--parser"
+    snapshots = model / "snapshots"
+    snapshots.mkdir(parents=True)
+
+    real_scan = debug._scan
+
+    def truncated_scan(directory, max_entries):
+        if directory == snapshots:
+            return [], True
+        return real_scan(directory, max_entries)
+
+    monkeypatch.setattr(debug, "_scan", truncated_scan)
+
+    out = debug._resolve_snapshot_path(tmp_path, "acme/parser")
+    assert out["resolved_path"] is None
+    assert "truncated" in str(out["issue"])
+
+
 def test_find_model_dir_bounds_its_snapshot_scan(tmp_path, monkeypatch, consumed):
     """This runs on the success path of a real job. Every other listing in the
     module is bounded; leaving this one unbounded also means the next reader
@@ -703,6 +722,39 @@ def test_an_unstattable_snapshot_does_not_erase_its_siblings(tmp_path, monkeypat
     monkeypatch.setattr(Path, "stat", flaky)
     try:
         assert debug.find_model_dir().endswith("good")
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_find_model_dir_does_not_select_a_symlinked_snapshot(tmp_path, monkeypatch):
+    from runpod_doc_worker import config
+
+    hub = _hub_with(tmp_path, monkeypatch)
+    model = hub / "models--acme--parser"
+    snapshots = model / "snapshots"
+    snapshots.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class SymlinkedDirectory:
+        name = "linked"
+        path = str(outside)
+
+        @staticmethod
+        def is_dir(*, follow_symlinks=True):
+            return follow_symlinks
+
+    real_scan = debug._scan
+
+    def scan_with_link(directory, max_entries):
+        if directory == snapshots:
+            return [SymlinkedDirectory()], False
+        return real_scan(directory, max_entries)
+
+    monkeypatch.setattr(debug, "_scan", scan_with_link)
+    try:
+        assert debug.find_model_dir() == str(model)
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()
