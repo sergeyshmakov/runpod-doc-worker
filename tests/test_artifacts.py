@@ -286,6 +286,39 @@ def test_an_exact_broken_match_omitted_by_pathlib_is_reported(
     assert report.entry()["items"][0]["reason"] == "unresolvable"
 
 
+def test_overlapping_patterns_report_one_unresolvable_path(
+    output_dir, monkeypatch, capsys
+):
+    manifest = (Artifact("markdown", ("{basename}.md", "*.md")),)
+    monkeypatch.setattr(
+        "runpod_doc_worker.paths.kind",
+        lambda path: "unresolvable" if path.name == "doc.md" else "file",
+    )
+    report = degraded.Report()
+
+    assert resolve(manifest, output_dir, "doc", report=report) == {"markdown": ""}
+    log_lines = capsys.readouterr().out.strip().splitlines()
+    assert report.entry()["count"] == 1
+    assert len(report.entry()["items"]) == 1
+    assert len(log_lines) == 1
+
+
+def test_a_dangling_link_to_an_outside_target_degrades(tmp_path, capsys):
+    job = tmp_path / "job"
+    job.mkdir()
+    try:
+        (job / "doc.md").symlink_to(tmp_path / "never-written.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    report = degraded.Report()
+
+    assert resolve(MANIFEST, job, "doc", keys=["markdown"], report=report) == {
+        "markdown": ""
+    }
+    capsys.readouterr()
+    assert report.entry()["items"][0]["reason"] == "unresolvable"
+
+
 # -----------------------------------------------------------------------------
 # Ambiguity is an error, not a silent choice
 # -----------------------------------------------------------------------------

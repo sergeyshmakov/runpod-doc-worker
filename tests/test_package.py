@@ -14,6 +14,7 @@ import json
 import sys
 import tarfile
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -318,6 +319,55 @@ def test_an_outside_directory_link_is_reported_before_directories_are_skipped(
     (item,) = entry["degraded"]["items"]
     assert item["file"] == "linked"
     assert item["reason"] == "outside_output_dir"
+
+
+def test_a_dangling_archive_link_outside_is_unresolvable(output_dir):
+    try:
+        (output_dir / "dangling").symlink_to(output_dir.parent / "never-written")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    entry = _entry(output_dir, transport="tarball_b64")
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "dangling"
+    assert item["reason"] == "unresolvable"
+
+
+@pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
+def test_an_archive_skips_a_member_that_fails_while_reading(
+    output_dir, monkeypatch, archive_format
+):
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(path):
+        if path.name == "doc_middle.json":
+            raise PermissionError("Permission denied")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    entry = _entry(
+        output_dir, transport="tarball_b64", archive_format=archive_format
+    )
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "doc_middle.json"
+    assert item["reason"] == "unreadable"
+    assert item["error_type"] == "PermissionError"
+
+    raw = base64.b64decode(entry["tarball_b64"])
+    if archive_format == "zip":
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            names = set(archive.namelist())
+            assert archive.read("doc.md") == b"# hello\n"
+            assert archive.read("images/fig1.png").endswith(b"fig1")
+            assert archive.getinfo("doc.md").compress_type == zipfile.ZIP_DEFLATED
+    else:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            names = {member.name for member in archive.getmembers()}
+            assert archive.extractfile("doc.md").read() == b"# hello\n"
+            assert archive.extractfile("images/fig1.png").read().endswith(b"fig1")
+    assert "doc_middle.json" not in names
 
 
 def test_a_symlink_staying_inside_the_output_is_kept(tmp_path):

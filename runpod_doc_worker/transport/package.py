@@ -94,6 +94,10 @@ def _archive_members(
     report = _degraded.sink(report)
     kept: list[Path] = []
     for child in sorted(output_dir.rglob("*")):
+        what = _paths.kind(child)
+        if what == _paths.UNRESOLVABLE:
+            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
+            continue
         where = _paths.relation(output_dir, child)
         if where != _paths.INSIDE:
             # Two different problems, and calling the second one an escape sends
@@ -107,14 +111,9 @@ def _archive_members(
                 file=child.name,
             )
             continue
-        # Classify only after containment: an ordinary in-tree directory is a
-        # silent non-member, but a link to an outside directory is an omission
-        # the report must name above.
-        what = _paths.kind(child)
+        # Skip only after containment: an ordinary in-tree directory is a
+        # silent non-member, but an outside directory link is reported above.
         if what == _paths.DIRECTORY:
-            continue
-        if what == _paths.UNRESOLVABLE:
-            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
             continue
         if not _safe_arcname(child.relative_to(output_dir).as_posix()):
             report.note(reason=_degraded.UNSAFE_NAME, file=child.name)
@@ -139,10 +138,25 @@ def _build_tarball_bytes(
     belong together: dereferencing an unfiltered list is how the zip path was
     leaking in the first place.
     """
+    report = _degraded.sink(report)
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
         for child in _archive_members(output_dir, report):
-            tar.add(child, arcname=child.relative_to(output_dir).as_posix())
+            arcname = child.relative_to(output_dir).as_posix()
+            try:
+                info = tar.gettarinfo(str(child), arcname=arcname)
+                data = child.read_bytes()
+            except OSError as exc:
+                report.note(
+                    reason=_degraded.UNREADABLE,
+                    file=child.name,
+                    error_type=type(exc).__name__,
+                )
+                continue
+            # The file can change between metadata and reading. The bytes in
+            # hand are authoritative for this archive member.
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
 
 
@@ -159,10 +173,22 @@ def _build_zip_bytes(
     files under the same names, and neither carries a link out of the output
     directory.
     """
+    report = _degraded.sink(report)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for child in _archive_members(output_dir, report):
-            zf.write(child, arcname=child.relative_to(output_dir).as_posix())
+            arcname = child.relative_to(output_dir).as_posix()
+            try:
+                info = zipfile.ZipInfo.from_file(child, arcname=arcname)
+                data = child.read_bytes()
+            except OSError as exc:
+                report.note(
+                    reason=_degraded.UNREADABLE,
+                    file=child.name,
+                    error_type=type(exc).__name__,
+                )
+                continue
+            zf.writestr(info, data, compress_type=zf.compression)
     return buf.getvalue()
 
 
@@ -387,6 +413,13 @@ def package_results_entry(
         **(metadata or {}),
     }
     report = _degraded.Report()
+    if transport != "inline":
+        # Archives carry the whole output and ignore `formats`, so every
+        # required declaration applies. Reuse Artifact.read for the established
+        # missing, decoding and JSON checks before building or uploading bytes.
+        for artifact in entries:
+            if artifact.required:
+                artifact.read(output_dir, basename, report)
     if transport == "tarball_b64":
         entry["tarball_b64"] = package_tarball(output_dir, archive_format, report)
     elif transport == "s3":

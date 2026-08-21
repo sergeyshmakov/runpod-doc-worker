@@ -55,7 +55,7 @@ entry = package_results_entry(
 
 ## Archive results
 
-`tarball_b64` and `s3` package every accepted file below `output_dir`. The `formats` argument does not filter archive members.
+`tarball_b64` and `s3` package every accepted file below `output_dir`. The `formats` argument does not filter archive members. Before either archive is built or uploaded, every manifest artifact marked `required` is checked; `formats` cannot filter that check either.
 
 Set `archive_format="zip"` for ZIP. Any other value currently falls back to the default gzip tar container, so validate a caller-supplied format before calling the package.
 
@@ -65,7 +65,7 @@ Files that resolve outside the output directory, files the filesystem cannot pla
 
 ## Degraded responses
 
-Packaging keeps a job alive through a broken output directory: an unreadable artifact falls back to its default, an unreadable collection member is left out of the map, and an archive member that cannot be safely named is left out of the archive. One corrupt file should not cost a caller the intact ones.
+Packaging keeps a job alive through a broken output directory: an unreadable artifact falls back to its default, an unreadable collection member is left out of the map, and an archive member that cannot be read or safely named is left out of the archive. One corrupt file should not cost a caller the intact ones.
 
 That trade only works if the caller knows it happened, so anything lost appears under `degraded` — and only then. A response that lost nothing does not carry the key:
 

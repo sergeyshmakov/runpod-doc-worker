@@ -248,10 +248,26 @@ class Artifact:
         check_basename(basename)
         report = _degraded.sink(report)
         found: list[Path] = []
+        reported_unresolvable: set[Path] = set()
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
             hits: list[Path] = []
             for p in _glob_hits(output_dir, expanded):
+                # A dangling link can resolve lexically outside the tree when
+                # its missing target is outside it. Its kind is still unknown,
+                # so report that fact rather than treating it as evidence of an
+                # escape. Existing outside files and directories reach the
+                # containment check below.
+                what = _paths.kind(p)
+                if what == _paths.UNRESOLVABLE:
+                    if p not in reported_unresolvable:
+                        report.note(
+                            reason=_degraded.UNRESOLVABLE,
+                            file=p.name,
+                            artifact=self.key,
+                        )
+                        reported_unresolvable.add(p)
+                    continue
                 where = _paths.relation(output_dir, p)
                 if where == _paths.OUTSIDE:
                     raise ValueError(
@@ -264,24 +280,18 @@ class Artifact:
                     # Unusable either way, so it is dropped like an unreadable
                     # file rather than failing a job over a traversal that
                     # nothing has evidence of.
-                    report.note(
-                        reason=_degraded.UNRESOLVABLE,
-                        file=p.name,
-                        artifact=self.key,
-                    )
+                    if p not in reported_unresolvable:
+                        report.note(
+                            reason=_degraded.UNRESOLVABLE,
+                            file=p.name,
+                            artifact=self.key,
+                        )
+                        reported_unresolvable.add(p)
                     continue
-                # Asked after containment, and not as `is_file()`: a symlink to
-                # an outside directory must be classified above, while an
-                # ordinary in-tree directory remains a silent non-match.
-                what = _paths.kind(p)
+                # Skipped only after containment: an outside directory link is
+                # rejected above, while an ordinary in-tree directory remains
+                # a silent non-match.
                 if what == _paths.DIRECTORY:
-                    continue
-                if what == _paths.UNRESOLVABLE:
-                    report.note(
-                        reason=_degraded.UNRESOLVABLE,
-                        file=p.name,
-                        artifact=self.key,
-                    )
                     continue
                 hits.append(p)
             if not hits:
