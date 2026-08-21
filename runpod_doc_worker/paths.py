@@ -72,8 +72,8 @@ def kind(path: Path) -> str:
     only asking about a type.
 
     Both callers here reach this via directory matching. Artifact matching
-    supplements ``Path.glob`` with ``glob.iglob`` because Python 3.10 and 3.11
-    omit a broken exact-name match; the latter includes broken symlinks.
+    separately probes an exact final component because Python 3.10 and 3.11
+    ``Path.glob`` omit a broken exact-name match before it reaches this helper.
     """
     try:
         if path.is_dir():

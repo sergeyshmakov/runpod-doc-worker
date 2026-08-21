@@ -81,15 +81,37 @@ def _glob_hits(output_dir: Path, pattern: str) -> list[Path]:
 
     Python 3.10 and 3.11 implement a literal path component by asking whether
     its target exists, so an exact pattern silently loses a dangling link or a
-    symlink loop. ``glob`` includes broken symlinks. Keep ``Path.glob`` as the
-    source of ordinary matches (including dotfiles), and take from ``glob``
-    only additional paths that the filesystem will not describe.
+    symlink loop. Keep ``Path.glob`` as the source of ordinary matches, then
+    probe an exact final component beneath the parents it already matched.
+    This preserves its ordering, duplicates, dotfile rules and recursive
+    symlink behaviour rather than introducing a second glob implementation.
     """
-    hits = set(output_dir.glob(pattern))
-    for relative in _glob.iglob(pattern, root_dir=output_dir, recursive=True):
-        candidate = output_dir / relative
-        if candidate not in hits and _paths.kind(candidate) == _paths.UNRESOLVABLE:
-            hits.add(candidate)
+    hits = list(output_dir.glob(pattern))
+    parts = Path(pattern).parts
+    if not parts or _glob.has_magic(parts[-1]):
+        return sorted(hits)
+
+    seen = set(hits)
+    parents = (output_dir,)
+    if len(parts) > 1:
+        parents = output_dir.glob(str(Path(*parts[:-1])))
+    for parent in parents:
+        candidate = parent / parts[-1]
+        if candidate in seen:
+            continue
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # The entry is named but cannot be stated; ``kind`` maps the same
+            # error to UNRESOLVABLE so the caller can report it.
+            pass
+        except ValueError:
+            continue
+        if _paths.kind(candidate) == _paths.UNRESOLVABLE:
+            hits.append(candidate)
+            seen.add(candidate)
     return sorted(hits)
 
 
@@ -230,24 +252,6 @@ class Artifact:
             expanded = pattern.format(basename=_glob.escape(basename))
             hits: list[Path] = []
             for p in _glob_hits(output_dir, expanded):
-                # Asked before the containment check, and not as `is_file()`:
-                # that answers False for a loop and for a link to nothing, the
-                # same False it gives a directory, so filtering on it would drop
-                # the broken ones here — one line before the check that exists
-                # to report them.
-                what = _paths.kind(p)
-                if what == _paths.DIRECTORY:
-                    # An engine writing a directory where an artifact goes is
-                    # ordinary; reporting it would teach a caller to ignore the
-                    # field.
-                    continue
-                if what == _paths.UNRESOLVABLE:
-                    report.note(
-                        reason=_degraded.UNRESOLVABLE,
-                        file=p.name,
-                        artifact=self.key,
-                    )
-                    continue
                 where = _paths.relation(output_dir, p)
                 if where == _paths.OUTSIDE:
                     raise ValueError(
@@ -260,6 +264,19 @@ class Artifact:
                     # Unusable either way, so it is dropped like an unreadable
                     # file rather than failing a job over a traversal that
                     # nothing has evidence of.
+                    report.note(
+                        reason=_degraded.UNRESOLVABLE,
+                        file=p.name,
+                        artifact=self.key,
+                    )
+                    continue
+                # Asked after containment, and not as `is_file()`: a symlink to
+                # an outside directory must be classified above, while an
+                # ordinary in-tree directory remains a silent non-match.
+                what = _paths.kind(p)
+                if what == _paths.DIRECTORY:
+                    continue
+                if what == _paths.UNRESOLVABLE:
                     report.note(
                         reason=_degraded.UNRESOLVABLE,
                         file=p.name,

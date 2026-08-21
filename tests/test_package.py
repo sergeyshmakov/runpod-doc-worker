@@ -303,6 +303,23 @@ def test_tar_does_not_carry_a_symlink_escaping_the_output(symlinked_output):
         assert "leak.txt" not in names
 
 
+def test_an_outside_directory_link_is_reported_before_directories_are_skipped(
+    output_dir,
+):
+    outside = output_dir.parent / f"{output_dir.name}-outside"
+    outside.mkdir()
+    try:
+        (output_dir / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    entry = _entry(output_dir, transport="tarball_b64")
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "linked"
+    assert item["reason"] == "outside_output_dir"
+
+
 def test_a_symlink_staying_inside_the_output_is_kept(tmp_path):
     """Only an escape is refused; an engine linking within its own output is
     describing its own layout."""

@@ -377,6 +377,23 @@ def test_a_pattern_that_escapes_the_output_dir_is_refused(tmp_path):
         resolve(manifest, job, "doc")
 
 
+def test_a_directory_link_outside_is_classified_before_directories_are_skipped(
+    tmp_path,
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    job = tmp_path / "job"
+    job.mkdir()
+    try:
+        (job / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    manifest = (Artifact("markdown", ("linked",), kind="text"),)
+    with pytest.raises(ValueError, match="outside the output directory"):
+        resolve(manifest, job, "doc")
+
+
 def test_an_ordinary_basename_still_resolves(tmp_path):
     (tmp_path / "report-2024_final.md").write_text("fine", encoding="utf-8")
     assert resolve(MANIFEST, tmp_path, "report-2024_final")["markdown"] == "fine"

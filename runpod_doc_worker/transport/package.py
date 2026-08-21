@@ -94,16 +94,6 @@ def _archive_members(
     report = _degraded.sink(report)
     kept: list[Path] = []
     for child in sorted(output_dir.rglob("*")):
-        # Not `is_file()`: it answers False for a loop and for a link to
-        # nothing as readily as for a directory, so filtering on it would leave
-        # those out of the archive without a word — which is what the report
-        # below exists to prevent.
-        what = _paths.kind(child)
-        if what == _paths.DIRECTORY:
-            continue
-        if what == _paths.UNRESOLVABLE:
-            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
-            continue
         where = _paths.relation(output_dir, child)
         if where != _paths.INSIDE:
             # Two different problems, and calling the second one an escape sends
@@ -116,6 +106,15 @@ def _archive_members(
                 ),
                 file=child.name,
             )
+            continue
+        # Classify only after containment: an ordinary in-tree directory is a
+        # silent non-member, but a link to an outside directory is an omission
+        # the report must name above.
+        what = _paths.kind(child)
+        if what == _paths.DIRECTORY:
+            continue
+        if what == _paths.UNRESOLVABLE:
+            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
             continue
         if not _safe_arcname(child.relative_to(output_dir).as_posix()):
             report.note(reason=_degraded.UNSAFE_NAME, file=child.name)
