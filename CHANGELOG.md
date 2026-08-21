@@ -1,3 +1,20 @@
+## [0.3.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.2.0...v0.3.0) (2026-08-21)
+
+### Features
+
+* **contract:** publish the message every loss is logged under ([e72c1cf](https://github.com/sergeyshmakov/runpod-doc-worker/commit/e72c1cf2da6e2bc118565930c34944b6f4876dc1))
+* **transport:** let a caller keep the degradation report ([00f9ba6](https://github.com/sergeyshmakov/runpod-doc-worker/commit/00f9ba6d9a6d332ee40be69c9973d7e25104b8de))
+* **transport:** publish the inline payload ceiling ([ca03a94](https://github.com/sergeyshmakov/runpod-doc-worker/commit/ca03a941161c8dcfcddc433f06c3e05e92c0b765))
+
+### Bug Fixes
+
+* **contract:** isolate aggregate degradation items ([bc4572c](https://github.com/sergeyshmakov/runpod-doc-worker/commit/bc4572c37a2cc815ab6505a6978ceb1088218a7b))
+* **transport:** keep degradation entries isolated ([5537d16](https://github.com/sergeyshmakov/runpod-doc-worker/commit/5537d1646c7b99caacbf84a2de7555505792ea62))
+
+### Documentation
+
+* warn that an editable install misreports the version ([7b898cc](https://github.com/sergeyshmakov/runpod-doc-worker/commit/7b898cc1a3444fbe68950416fedb3b31f7f85b85))
+
 ## [0.2.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.1.0...v0.2.0) (2026-08-21)
 
 ### Features
