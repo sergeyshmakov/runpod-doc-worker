@@ -13,6 +13,12 @@ output directory regardless, so `formats` is a no-op on those.
 
 What "the declared artifacts" means is the engine's to say; it hands in a
 manifest of :class:`runpod_doc_worker.contract.artifacts.Artifact`.
+
+Anything packaging had to leave out — an unreadable artifact, a member the
+archive cannot carry — is reported on the entry under ``degraded``, and only
+when there is something to report. See
+:mod:`runpod_doc_worker.contract.degraded` for why that lives in the response
+rather than only in the log.
 """
 
 from __future__ import annotations

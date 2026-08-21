@@ -33,6 +33,14 @@ being dropped, so a caller reading ``response["results"][0]["markdown"]`` gets
 an empty string instead of a KeyError when a page produced no text. Each call
 gets its own copy of that default: a response is a mutable thing handed to a
 caller, and a worker process serves many jobs.
+
+A file that is present but cannot be read yields that same default, and says
+so: the substitution is recorded in a
+:class:`runpod_doc_worker.contract.degraded.Report` as well as logged, because
+an empty value on its own cannot be told apart from a page that had no text.
+An engine that cannot produce a useful response without a particular artifact
+declares it ``required``, and an absent or unreadable one raises
+:class:`ArtifactError` instead.
 """
 
 from __future__ import annotations

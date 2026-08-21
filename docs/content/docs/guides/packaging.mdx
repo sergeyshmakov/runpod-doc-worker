@@ -26,7 +26,7 @@ entry = package_results_entry(
 )
 ```
 
-The package owns the `basename` and `source` fields. Metadata and manifest keys cannot replace them.
+The package owns the `basename`, `source` and `degraded` fields. Metadata and manifest keys cannot replace them.
 
 ## Choose a transport
 
@@ -61,7 +61,43 @@ Set `archive_format="zip"` for ZIP. Any other value currently falls back to the 
 
 Archives are assembled in memory. `tarball_b64` also pays base64 response overhead, which makes it a poor fit for large output directories.
 
-Files that resolve outside the output directory or have unsafe archive names are skipped with warnings. An in-tree symlink is stored as its target bytes rather than as a link.
+Files that resolve outside the output directory, files the filesystem cannot place, and files whose names are unsafe to extract are skipped rather than archived, and each skip appears in the entry's [degradation report](#degraded-responses). An in-tree symlink is stored as its target bytes rather than as a link.
+
+## Degraded responses
+
+Packaging keeps a job alive through a broken output directory: an unreadable artifact falls back to its default, an unreadable collection member is left out of the map, and an archive member that cannot be safely named is left out of the archive. One corrupt file should not cost a caller the intact ones.
+
+That trade only works if the caller knows it happened, so anything lost appears under `degraded` — and only then. A response that lost nothing does not carry the key:
+
+```json
+{
+  "basename": "report",
+  "source": "url:https://example.com/report.pdf",
+  "markdown": "",
+  "degraded": {
+    "count": 1,
+    "items": [
+      {"artifact": "markdown", "file": "report.md", "reason": "unreadable",
+       "error_type": "UnicodeDecodeError"}
+    ]
+  }
+}
+```
+
+`count` is the true total. `items` stops at 50, so `count` above `len(items)` means the list is abridged rather than complete.
+
+| Field | Meaning |
+| --- | --- |
+| `artifact` | Manifest key this cost the response, or `null` for an archive member, which is not resolved through the manifest |
+| `file` | Filename, never a path — the output directory is a temp path on a worker and means nothing to a caller |
+| `reason` | `unreadable`, `unresolvable`, `outside_output_dir`, or `unsafe_name` |
+| `error_type` | Exception class name, when an exception revealed the problem |
+
+`reason` values are stable and bounded, which makes them usable as a metric label or a branch in a caller's retry logic. Treat a `degraded` entry as a document to requeue: the response is otherwise successful, so nothing else will flag it.
+
+Every item is also written to stdout as a `response degraded` warning carrying the same fields. One message covers every drop site, present and future, so a log-based alert needs one rule rather than one per case. The response field is the per-document signal; the log line is the aggregate one.
+
+To decide the outcome yourself rather than shipping a hole, mark the artifact [`required`](/docs/guides/artifacts/#require-the-artifact-the-response-exists-for).
 
 ## S3 configuration
 
