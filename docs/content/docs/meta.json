@@ -1,0 +1,10 @@
+{
+  "title": "runpod-doc-worker",
+  "pages": [
+    "index",
+    "getting-started",
+    "guides",
+    "reference",
+    "security"
+  ]
+}

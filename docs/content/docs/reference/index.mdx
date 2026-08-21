@@ -1,0 +1,142 @@
+---
+title: Python API and environment reference
+description: Look up the public runpod-doc-worker functions, environment variables, defaults, and transport limits.
+---
+
+This reference covers the public functions intended for worker composition in v0.1.0. The package is pre-release, so pin a tag and review changes before upgrading.
+
+## Root package
+
+```python
+from runpod_doc_worker import WorkerConfig, active, configure, __version__
+```
+
+| Name | Purpose |
+| --- | --- |
+| `WorkerConfig` | Immutable worker-owned configuration |
+| `configure(config)` | Install process-wide configuration |
+| `active()` | Return the active configuration |
+| `__version__` | Installed package version |
+
+`DEFAULT_VOLUME_ROOTS` is exported from `runpod_doc_worker.config`.
+
+## Input transport
+
+From `runpod_doc_worker.transport.io`:
+
+| Function | Result |
+| --- | --- |
+| `resolve_input_bytes(job_input)` | Async `(bytes, source_label)` tuple |
+| `resolve_volume_file(volume_path)` | Contained, resolved `Path` |
+| `volume_roots()` | Effective allowed roots |
+| `detect_format(file_bytes)` | `pdf`, `image`, `ooxml`, or `unknown` |
+| `telemetry_source_kind(source_label)` | Bounded source category |
+
+From `runpod_doc_worker.transport.net`:
+
+| Function | Purpose |
+| --- | --- |
+| `require_http_url(url, *, field)` | Parse and require an HTTP or HTTPS URL |
+| `resolve_checked(url, *, field)` | Resolve a host and reject disallowed addresses |
+| `check_target(url, *, field)` | Validate the target without fetching it |
+
+The checked transport classes and private httpx/httpcore integration are implementation details.
+
+## Artifact contract
+
+From `runpod_doc_worker.contract.artifacts`:
+
+| Name | Purpose |
+| --- | --- |
+| `Artifact(key, patterns, kind, default)` | Declare one response field |
+| `validate(manifest)` | Validate the manifest and return a tuple |
+| `resolve(manifest, output_dir, basename, keys=None)` | Read selected artifacts |
+| `keys(manifest)` | List declared keys in order |
+
+Valid kinds are `text`, `json`, and `b64map`.
+
+## Result packaging
+
+From `runpod_doc_worker.transport.package`:
+
+| Function | Purpose |
+| --- | --- |
+| `package_results_entry(...)` | Build one transport-specific result dictionary |
+| `package_inline(...)` | Resolve selected manifest values |
+| `package_tarball(output_dir, archive_format="tar.gz")` | Return a base64 archive |
+| `package_s3(output_dir, basename, archive_format="tar.gz")` | Upload and presign an archive |
+| `presign_ttl_seconds()` | Read and clamp the S3 URL lifetime |
+
+Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive formats are `tar.gz` and `zip`.
+
+## Logging and redaction
+
+From `runpod_doc_worker.obs.logging`:
+
+- `job_id_var`
+- `info(message, **fields)`
+- `warning(message, **fields)`
+- `error(message, **fields)`
+- `debug(message, **fields)`
+
+From `runpod_doc_worker.obs.redact`:
+
+- `compact(text, *, limit=2000)`
+- `compact_url(url)`
+
+## Diagnostics
+
+From `runpod_doc_worker.obs.debug`:
+
+- `probe_enabled()`
+- `collect_gpu_info()`
+- `find_model_dir()`
+- `probe_filesystem()`
+
+Diagnostic helpers return data for the consumer's handler. They do not create a RunPod probe route.
+
+## Hub validation
+
+From `runpod_doc_worker.testing.hub`:
+
+- `check(path)`
+- `problems(hub)`
+- `check_test_inputs(path, roots=None)`
+
+## Environment variables
+
+`<PREFIX>` is the `env_prefix` from `WorkerConfig`.
+
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `<PREFIX>_VOLUME_ROOTS` | Configured roots | Volume input containment |
+| `<PREFIX>_ALLOW_LOCAL_FETCH` | Disabled | URL target policy |
+| `<PREFIX>_DISABLE_PROBE` | Disabled | Consumer-enforced probe switch |
+| `LOG_FORMAT` | `json` | Log rendering; set `text` for local output |
+| `LOG_LEVEL` | `info` | Set `debug` to enable debug records |
+| `BUCKET_ENDPOINT_URL` | None | Required S3 endpoint |
+| `BUCKET_NAME` | None | Required S3 bucket |
+| `BUCKET_ACCESS_KEY_ID` | None | Required S3 access key |
+| `BUCKET_SECRET_ACCESS_KEY` | None | Required S3 secret |
+| `BUCKET_REGION` | None | Optional S3 region |
+| `BUCKET_PREFIX` | Empty | Optional object-key prefix |
+| `BUCKET_PRESIGN_TTL_SECONDS` | `3600` | S3 URL lifetime, clamped to 60 through 604800 |
+| `HF_HUB_CACHE` | Library default | Preferred Hugging Face Hub cache override |
+| `HUGGINGFACE_HUB_CACHE` | Library default | Legacy Hub cache override |
+| `HF_HOME` | Library default | Hugging Face home used to derive the Hub cache |
+| `XDG_CACHE_HOME` | Platform default | Cache root when Hugging Face overrides are absent |
+
+Proxy environment variables are honored by URL fetching. A proxy is responsible for the destination policy of hostnames it resolves.
+
+## Input and diagnostic limits
+
+| Limit | Value |
+| --- | --- |
+| Inline decoded input | 20 MiB |
+| URL input | 200 MiB |
+| URL inactivity timeout | 120 seconds |
+| URL wall-clock budget | 300 seconds |
+| Redacted text default limit | 2,000 characters |
+| Hub description limit | 189 characters |
+
+Task-oriented behavior and qualifications live in the [input](/docs/guides/inputs/), [artifact](/docs/guides/artifacts/), [packaging](/docs/guides/packaging/), and [observability](/docs/guides/observability/) guides.

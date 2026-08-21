@@ -1,0 +1,51 @@
+---
+title: Overview
+description: Understand what runpod-doc-worker provides and what your RunPod document worker still needs to implement.
+---
+
+`runpod-doc-worker` is a Python package for the engine-independent parts of a RunPod document-processing worker. It resolves document inputs, checks outbound targets, declares output artifacts, packages results, writes structured logs, and exposes diagnostic helpers.
+
+The package does not include a RunPod handler or a document engine. A worker repository supplies those parts and decides its public request and response contract.
+
+<Callout type="warn" title="Pre-release API">
+  Version 0.1.0 is usable, but its API is expected to move. Pin a release tag and review the changelog before upgrading.
+</Callout>
+
+## What the package owns
+
+| Area | Included behavior |
+| --- | --- |
+| Input transport | URL, base64, and volume-path resolution with size and path checks |
+| Network checks | HTTP target resolution and checked direct connections |
+| Artifact contracts | Declarative `text`, `json`, and `b64map` result extraction |
+| Result packaging | Inline output, base64 archives, and optional S3 upload |
+| Observability | One-line logs, job ID context, redaction helpers, and diagnostics |
+| Worker validation | Focused checks for RunPod Hub metadata and test fixtures |
+
+## What your worker owns
+
+Your worker still defines:
+
+- the engine and its dependencies;
+- the RunPod handler and entry point;
+- validation for the public job schema;
+- the response envelope exposed to callers;
+- the container image, endpoint configuration, and deployment process.
+
+This boundary keeps model-specific names and behavior out of the shared package. A worker running a different engine should be able to reuse the same modules unchanged.
+
+## Start with the adoption path
+
+<Cards>
+  <Card title="Install and adopt" description="Pin v0.1.0 and add the package to a worker." href="/docs/getting-started/install/" />
+  <Card title="Configure a worker" description="Declare paths, log names, and model-cache hints." href="/docs/getting-started/configuration/" />
+  <Card title="Accept document inputs" description="Resolve URL, base64, and volume inputs safely." href="/docs/guides/inputs/" />
+  <Card title="Package results" description="Return artifacts inline, in an archive, or through S3." href="/docs/guides/packaging/" />
+</Cards>
+
+## Project links
+
+- [Source repository](https://github.com/sergeyshmakov/runpod-doc-worker)
+- [v0.1.0 release](https://github.com/sergeyshmakov/runpod-doc-worker/releases/tag/v0.1.0)
+- [Changelog](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/CHANGELOG.md)
+- [Contributing guide](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/CONTRIBUTING.md)

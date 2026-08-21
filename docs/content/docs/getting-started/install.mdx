@@ -1,0 +1,69 @@
+---
+title: Install and adopt
+description: Install runpod-doc-worker from a pinned release and connect its reusable modules to your own worker.
+---
+
+Install `runpod-doc-worker` from a tagged GitHub archive. Version 0.1.0 is not documented as a PyPI package, so use the PEP 508 direct-reference form.
+
+## Add the dependency
+
+Put this line in `requirements.txt` when the worker uses S3 result packaging:
+
+```text
+runpod-doc-worker[s3] @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.1.0.tar.gz
+```
+
+Remove `[s3]` if the worker only returns inline results or base64 archives:
+
+```text
+runpod-doc-worker @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.1.0.tar.gz
+```
+
+The `s3` extra installs `boto3`. The base package depends on `httpx` and `httpcore` and requires Python 3.10 or newer.
+
+## Declare worker-specific values
+
+Call `configure()` once when the process starts:
+
+```python
+from runpod_doc_worker import WorkerConfig, configure
+from runpod_doc_worker.config import DEFAULT_VOLUME_ROOTS
+
+configure(
+    WorkerConfig(
+        env_prefix="ACME",
+        logger_name="acme-worker",
+        volume_roots=DEFAULT_VOLUME_ROOTS + ("/worker",),
+        model_globs=("models--acme--parser*",),
+    )
+)
+```
+
+The package stores this configuration process-wide. Configure it during boot, before a job can call transport, logging, or diagnostic helpers.
+
+## Declare the output contract
+
+An artifact manifest tells the package which engine-written files can become inline response fields:
+
+```python
+from runpod_doc_worker.contract.artifacts import Artifact
+
+MANIFEST = (
+    Artifact("markdown", ("{basename}.md",), kind="text"),
+    Artifact(
+        "blocks",
+        ("{basename}_blocks.json",),
+        kind="json",
+        default=[],
+    ),
+    Artifact("images", ("images/*",), kind="b64map"),
+)
+```
+
+The worker's handler calls the transport and packaging functions. This package does not register a handler, start the RunPod runtime, or decide the job envelope.
+
+## Upgrade deliberately
+
+The API is pre-release. Pin a tag rather than a branch, then review the [changelog](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/CHANGELOG.md) before changing that tag.
+
+Continue with [worker configuration](/docs/getting-started/configuration/) or [input transport](/docs/guides/inputs/).

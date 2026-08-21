@@ -1,0 +1,72 @@
+---
+title: Security model
+description: Understand input, network, archive, credential, and diagnostic trust boundaries in runpod-doc-worker.
+---
+
+`runpod-doc-worker` handles data at the boundary between a caller and a worker's filesystem, network, logs, and result storage. It provides targeted checks at that boundary. It does not sandbox the document engine or authorize callers.
+
+## Input boundaries
+
+### Volume paths
+
+Treat `volume_path` as privileged input. The package resolves the requested path, including symlinks and `..` components, before checking it against allowed roots.
+
+Use roots that expose only the directories the worker needs:
+
+```text
+ACME_VOLUME_ROOTS=/runpod-volume/incoming,/worker/fixtures
+```
+
+The worker should also validate any path it constructs from other caller-controlled fields.
+
+### URL targets
+
+Direct HTTP connections resolve and reject non-public target addresses. The socket opens against a checked address, and redirects repeat the target check.
+
+Do not set `<PREFIX>_ALLOW_LOCAL_FETCH=1` on an endpoint where an untrusted caller chooses the URL. That setting permits private and local addresses.
+
+When a configured proxy resolves a hostname, destination enforcement belongs to the proxy. Configure the proxy's egress policy separately.
+
+### Resource limits
+
+Inline and URL inputs have package-level size limits. URL fetches also have inactivity and total wall-clock limits. Volume files have no package size cap and are read into memory, so a consumer may need a stricter limit for its workload.
+
+Set the RunPod endpoint execution timeout low enough to stop a stalled engine from consuming GPU time indefinitely. The package does not configure that timeout.
+
+## Output boundaries
+
+Artifact resolution rejects basenames and file matches that escape the output directory. Archive construction also checks source containment and archive member names.
+
+Unsafe archive entries are skipped with warnings so the remaining result can still be returned. Review those warnings because they indicate an engine output layout that should be corrected.
+
+Archives are assembled in memory. Bound the engine's output size before selecting an archive transport.
+
+## Credentials and S3
+
+Pass `BUCKET_SECRET_ACCESS_KEY` and other credentials through endpoint environment configuration. Do not put credentials in job input or commit them to a repository.
+
+A presigned URL is a bearer credential. Anyone who has it can read the object until the signature expires. The package does not delete objects, rotate credentials, or configure bucket lifecycle rules.
+
+## Logs and diagnostics
+
+Use `telemetry_source_kind()` instead of logging a raw URL source label. Use `redact.compact()` to remove URL credentials, queries, and fragments from error text, but do not treat it as a general secret scrubber.
+
+`probe_filesystem()` can expose cache paths and selected environment values. Keep diagnostic responses behind an operator-only boundary. The package does not decide who may request them.
+
+## Responsibility boundary
+
+The worker repository remains responsible for:
+
+- caller authentication and authorization;
+- engine and model security;
+- document-content scanning or sandboxing;
+- the RunPod handler, SDK, container image, and deployment;
+- endpoint timeouts, proxy policy, and bucket retention.
+
+Vulnerabilities in those components should be reported to their maintainers or the worker repository that owns them.
+
+## Report a vulnerability
+
+Report package vulnerabilities privately through [GitHub Security Advisories](https://github.com/sergeyshmakov/runpod-doc-worker/security/advisories/new). Do not open a public issue. The project aims to send an initial response within five working days.
+
+Read the repository [security policy](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/SECURITY.md) for scope details.

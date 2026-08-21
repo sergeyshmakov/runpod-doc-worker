@@ -1,0 +1,99 @@
+---
+title: Package and return results
+description: Return worker output inline, as a base64 archive, or through an optional S3-compatible transport.
+---
+
+`package_results_entry()` combines the worker-owned metadata with one transport-specific payload. It returns one dictionary that a handler can place inside its own response envelope.
+
+```python
+from pathlib import Path
+
+from runpod_doc_worker.contract.artifacts import Artifact
+from runpod_doc_worker.transport.package import package_results_entry
+
+MANIFEST = (
+    Artifact("markdown", ("{basename}.md",), kind="text"),
+)
+
+entry = package_results_entry(
+    transport="inline",
+    formats=["markdown"],
+    output_dir=Path("/tmp/job-output"),
+    basename="document",
+    source="b64",
+    manifest=MANIFEST,
+    metadata={"pages_requested": 1},
+)
+```
+
+The package owns the `basename` and `source` fields. Metadata and manifest keys cannot replace them.
+
+## Choose a transport
+
+| Transport | Returned payload | Use when |
+| --- | --- | --- |
+| `inline` | Selected manifest values | Results are small and useful as JSON fields |
+| `tarball_b64` | Base64 archive in `tarball_b64` | The caller needs every output file in one response |
+| `s3` | Presigned URL and object details | The archive should stay outside the RunPod response body |
+
+Transport names are case-sensitive. An unsupported value raises `ValueError`.
+
+## Inline results
+
+For `inline`, `formats` selects manifest keys. A filtered key is omitted, while a requested missing artifact uses its default.
+
+```python
+entry = package_results_entry(
+    transport="inline",
+    formats=["markdown", "blocks"],
+    output_dir=output_dir,
+    basename=basename,
+    source=source,
+    manifest=MANIFEST,
+)
+```
+
+## Archive results
+
+`tarball_b64` and `s3` package every accepted file below `output_dir`. The `formats` argument does not filter archive members.
+
+Set `archive_format="zip"` for ZIP. Any other value currently falls back to the default gzip tar container, so validate a caller-supplied format before calling the package.
+
+Archives are assembled in memory. `tarball_b64` also pays base64 response overhead, which makes it a poor fit for large output directories.
+
+Files that resolve outside the output directory or have unsafe archive names are skipped with warnings. An in-tree symlink is stored as its target bytes rather than as a link.
+
+## S3 configuration
+
+Install the `s3` extra and set these variables on the endpoint:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `BUCKET_ENDPOINT_URL` | Yes | S3 API endpoint |
+| `BUCKET_NAME` | Yes | Destination bucket |
+| `BUCKET_ACCESS_KEY_ID` | Yes | Access key ID |
+| `BUCKET_SECRET_ACCESS_KEY` | Yes | Secret access key |
+| `BUCKET_REGION` | No | Provider region |
+| `BUCKET_PREFIX` | No | Prefix added before the generated object key |
+| `BUCKET_PRESIGN_TTL_SECONDS` | No | Presigned URL lifetime |
+
+The URL lifetime defaults to 3,600 seconds and is clamped to 60 through 604,800 seconds. An unparseable value falls back to the default.
+
+An S3 result contains:
+
+```json
+{
+  "tarball_url": "https://storage.example/presigned-value",
+  "tarball_url_expires_in": 3600,
+  "bucket_key": "document-a1b2c3d4.tar.gz",
+  "bucket_bytes": 12345
+}
+```
+
+The object key includes a UUID to avoid collisions. The package does not delete uploaded objects or configure bucket retention.
+
+<Callout type="warn" title="Treat presigned URLs as credentials">
+  Anyone with a presigned URL can download the object until it expires. Do not put that URL in logs, traces, or public error messages.
+</Callout>
+
+See [artifact manifests](/docs/guides/artifacts/) for inline extraction rules and the [security model](/docs/security/) for output boundaries.

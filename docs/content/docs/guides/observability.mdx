@@ -1,0 +1,73 @@
+---
+title: Logging and diagnostics
+description: Add job-correlated stdout logs, compact failure text, and bounded worker diagnostics to a RunPod handler.
+---
+
+The observability modules write directly to stdout and expose diagnostic data for a handler to compose. They do not install a handler or automatically answer probe jobs.
+
+## Correlate logs with a job
+
+Set and reset `job_id_var` around each job:
+
+```python
+from runpod_doc_worker.obs import logging as worker_logging
+
+token = worker_logging.job_id_var.set(job_id)
+try:
+    worker_logging.info("processing started", source_kind="b64")
+finally:
+    worker_logging.job_id_var.reset(token)
+```
+
+The default output is one JSON object per line. Set `LOG_FORMAT=text` for compact local output. Set `LOG_LEVEL=debug` to enable calls to `debug()`; this variable does not filter the other levels.
+
+The public emitters are `info()`, `warning()`, `error()`, and `debug()`. Caller fields cannot replace `ts`, `level`, `logger`, `msg`, or `job_id`.
+
+## Mirror records to another sink
+
+Set `WorkerConfig.log_mirror` to a callback with the signature `(level, message, fields)`. Stdout is written first. If the mirror raises, the worker emits a warning and continues the job.
+
+```python
+def mirror(level: str, message: str, fields: dict) -> None:
+    telemetry_client.write(level, message, fields)
+```
+
+## Compact failure text
+
+Use `compact()` before returning exception text to a caller:
+
+```python
+from runpod_doc_worker.obs.redact import compact
+
+safe_message = compact(str(exc))
+```
+
+The helper removes credentials, query strings, and fragments from URLs and limits output length. It does not remove arbitrary API keys, tokens, or every secret that may appear in a message.
+
+## Collect diagnostics
+
+```python
+from runpod_doc_worker.obs import debug
+
+diagnostics = {
+    "gpu": debug.collect_gpu_info(),
+    "model_dir": debug.find_model_dir(),
+    "filesystem": debug.probe_filesystem(),
+}
+```
+
+`collect_gpu_info()` inspects device 0 when Torch is available. Missing Torch and inspection errors are returned as data.
+
+`find_model_dir()` searches the effective Hugging Face Hub cache using `model_globs`. It reports a recent matching cache directory, not proof of which model weights handled a job.
+
+`probe_filesystem()` performs bounded, read-only, network-free scans. Results can include partial-scan markers when a limit is reached.
+
+<Callout type="warn" title="Keep diagnostics behind an operator boundary">
+  Filesystem diagnostics expose cache paths and selected environment values. Do not return them to untrusted callers.
+</Callout>
+
+## Compose probe handling yourself
+
+`probe_enabled()` reads `<PREFIX>_DISABLE_PROBE`, but the package does not inspect `{"probe": true}` or create a probe response. A consumer handler must enforce the setting and decide who may request diagnostics.
+
+Use [worker configuration](/docs/getting-started/configuration/) to select cache patterns and probe fields.

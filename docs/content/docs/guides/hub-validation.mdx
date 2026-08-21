@@ -1,0 +1,48 @@
+---
+title: Validate RunPod Hub files
+description: Add focused CI checks for RunPod Hub descriptions and volume-based test fixtures.
+---
+
+`runpod_doc_worker.testing.hub` provides focused assertions that a worker repository can call from its own tests.
+
+```python
+from pathlib import Path
+
+from runpod_doc_worker.testing import hub
+
+ROOT = Path(__file__).parents[1]
+
+
+def test_runpod_metadata() -> None:
+    hub.check(ROOT / ".runpod" / "hub.json")
+    hub.check_test_inputs(
+        ROOT / ".runpod" / "tests.json",
+        roots=("/runpod-volume", "/workspace", "/tmp", "/worker"),
+    )
+```
+
+## Check `hub.json`
+
+`hub.check()` verifies that the file exists, parses to a JSON object, includes environment entries, and gives each environment entry a name and non-empty description. Top-level and environment descriptions are limited to 189 characters.
+
+Use `hub.problems()` when the caller needs the complete list instead of an assertion:
+
+```python
+from runpod_doc_worker.testing.hub import load, problems
+
+issues = problems(load(".runpod/hub.json"))
+```
+
+## Check volume test fixtures
+
+`check_test_inputs()` requires a top-level `tests` key. For each test with `input.volume_path`, it normalizes the container path and checks that it remains below an allowed POSIX root.
+
+Pass explicit roots when CI has not called `configure()` or when its configuration differs from the release image. The default comes from `config.active().volume_roots`; it does not read the runtime `<PREFIX>_VOLUME_ROOTS` override.
+
+## Scope of the validator
+
+These helpers are not a complete RunPod Hub schema validator. They do not check every job field, verify URLs, confirm local file existence, or prove that a listing can be published. Tests without `volume_path` are skipped.
+
+Malformed JSON can raise the underlying JSON parsing error. Treat that as a failed repository test.
+
+See the repository [contributing guide](https://github.com/sergeyshmakov/runpod-doc-worker/blob/main/CONTRIBUTING.md) for the full local test command.

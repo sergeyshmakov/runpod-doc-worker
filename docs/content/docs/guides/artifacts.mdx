@@ -1,0 +1,66 @@
+---
+title: Declare output artifacts
+description: Map engine-written files to validated text, JSON, and base64 response fields with an artifact manifest.
+---
+
+An artifact manifest describes which files an engine writes and how selected files become inline response values.
+
+```python
+from pathlib import Path
+
+from runpod_doc_worker.contract.artifacts import Artifact, resolve
+
+MANIFEST = (
+    Artifact("markdown", ("{basename}.md",), kind="text"),
+    Artifact(
+        "blocks",
+        ("{basename}_blocks.json",),
+        kind="json",
+        default=[],
+    ),
+    Artifact("images", ("images/*",), kind="b64map"),
+)
+
+result = resolve(
+    MANIFEST,
+    Path("/tmp/job-output"),
+    basename="document",
+    keys=["markdown", "blocks"],
+)
+```
+
+## Artifact kinds
+
+| Kind | Result | Derived default |
+| --- | --- | --- |
+| `text` | UTF-8 string from one file | `""` |
+| `json` | Parsed JSON from one file | `{}` |
+| `b64map` | Filename to base64 string mapping | `{}` |
+
+Defaults are copied for each read. Mutating one response does not change the next response.
+
+## Pattern behavior
+
+Patterns are evaluated in declaration order. For `text` and `json`, the first pattern with a match wins and must match only one file. `b64map` collects every match and uses each filename as its response key.
+
+`{basename}` is substituted safely. A basename cannot be empty, equal `.` or `..`, contain a path separator, or use glob metacharacters to select another document's output.
+
+The package rejects:
+
+- duplicate manifest keys;
+- unknown requested keys;
+- single-value patterns that match more than one file;
+- duplicate filenames collected into one `b64map`;
+- matches that resolve outside `output_dir`.
+
+## Missing and unreadable files
+
+A missing artifact returns its declared or derived default. Unreadable text or JSON also returns the default and writes a warning. An unreadable `b64map` member is skipped while readable members remain in the result.
+
+Filtering with `keys` omits other keys completely. It does not emit them with empty values.
+
+<Callout type="info" title="Archives use the output directory">
+  Artifact patterns control inline extraction. Archive transports package the complete output directory instead of using the manifest as an archive allowlist.
+</Callout>
+
+Continue with [result packaging](/docs/guides/packaging/).

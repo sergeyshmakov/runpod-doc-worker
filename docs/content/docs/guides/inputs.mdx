@@ -1,0 +1,75 @@
+---
+title: Accept document inputs
+description: Resolve URL, base64, or volume inputs with bounded downloads, checked targets, and path containment.
+---
+
+`resolve_input_bytes()` reads exactly one input source and returns the document bytes with a source label. A worker can then use `detect_format()` for a coarse container check before handing the bytes to its engine.
+
+## Resolve an inline document
+
+```python
+import asyncio
+
+from runpod_doc_worker.transport.io import (
+    detect_format,
+    resolve_input_bytes,
+)
+
+
+async def main() -> None:
+    file_bytes, source = await resolve_input_bytes(
+        {"file_b64": "JVBERi0xLjcK"}
+    )
+    print(source)                    # b64
+    print(detect_format(file_bytes)) # pdf
+
+
+asyncio.run(main())
+```
+
+The input mapping must contain exactly one truthy key:
+
+- `file_url`
+- `file_b64`
+- `volume_path`
+
+## Input limits
+
+| Source | Limit | Notes |
+| --- | --- | --- |
+| `file_b64` | 20 MiB decoded | Encoded length is checked before allocating the decoded copy |
+| `file_url` | 200 MiB | `Content-Length` and streamed bytes are both checked |
+| `volume_path` | No package size cap | The file is read fully into memory |
+
+URL fetches have a 120-second inactivity timeout and a 300-second wall-clock budget. HTTP and HTTPS are the only accepted URL schemes.
+
+## URL target checks
+
+Direct connections resolve the hostname and reject non-public addresses. The checked address is also used when the socket opens, which closes the gap between validating a hostname and connecting to it. Redirect requests go through the same check.
+
+Set `<PREFIX>_ALLOW_LOCAL_FETCH=1` only for controlled development or private-network cases. It removes the public-routability restriction and is unsafe when an untrusted caller chooses the URL.
+
+When an environment proxy handles a hostname, the proxy resolves the final destination and must enforce its own destination policy. Literal IP targets still receive package-level checks.
+
+<Callout type="warn" title="Do not log the raw URL label">
+  The returned source label for a URL contains the original URL. Use `telemetry_source_kind(source)` to record `url`, `b64`, `volume`, or `unknown` without copying the URL into telemetry.
+</Callout>
+
+## Volume containment
+
+`volume_path` must be absolute, resolve to a file, and remain under an allowed root after resolving `..` components and symlinks. Use the narrowest roots that fit the worker:
+
+```text
+ACME_VOLUME_ROOTS=/runpod-volume/incoming,/worker/fixtures
+```
+
+## Format detection
+
+`detect_format()` returns `pdf`, `image`, `ooxml`, or `unknown` from magic bytes.
+
+- `image` covers PNG, JPEG, GIF, BMP, TIFF, and WebP.
+- `ooxml` means a ZIP container. It does not prove that the file is DOCX, PPTX, or XLSX.
+
+The engine remains responsible for accepting or rejecting the detected content.
+
+Review the [security model](/docs/security/) before enabling URL or volume inputs on a public endpoint.
