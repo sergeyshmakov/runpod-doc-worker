@@ -55,17 +55,17 @@ entry = package_results_entry(
 
 ## Archive results
 
-`tarball_b64` and `s3` package every accepted file below `output_dir`. The `formats` argument does not filter archive members. Before either archive is built or uploaded, every manifest artifact marked `required` is checked; `formats` cannot filter that check either.
+`tarball_b64` and `s3` package every accepted file below `output_dir`. The `formats` argument does not filter archive members. Every manifest artifact marked `required` must select a file that is accepted into the archive, can be read, and validates as its declared text or JSON kind. Validation uses the exact bytes written to the archive, before S3 upload; `formats` cannot filter that requirement.
 
 Set `archive_format="zip"` for ZIP. Any other value currently falls back to the default gzip tar container, so validate a caller-supplied format before calling the package.
 
 Archives are assembled in memory. `tarball_b64` also pays base64 response overhead, which makes it a poor fit for large output directories.
 
-Files that resolve outside the output directory, files the filesystem cannot place, and files whose names are unsafe to extract are skipped rather than archived, and each skip appears in the entry's [degradation report](#degraded-responses). An in-tree symlink is stored as its target bytes rather than as a link.
+Files that resolve outside the output directory, files the filesystem cannot place, and files whose names are unsafe to extract are skipped rather than archived, and each skip appears in the entry's [degradation report](#degraded-responses). If one of those files satisfied a `required` artifact, packaging raises instead of returning an archive without it. An in-tree symlink is stored as its target bytes rather than as a link.
 
 ## Degraded responses
 
-Packaging keeps a job alive through a broken output directory: an unreadable artifact falls back to its default, an unreadable collection member is left out of the map, and an archive member that cannot be read or safely named is left out of the archive. One corrupt file should not cost a caller the intact ones.
+Packaging keeps a job alive through a broken output directory: an unreadable optional artifact falls back to its default, an unreadable collection member is left out of the map, and an optional archive member that cannot be read or safely named is left out of the archive. One corrupt optional file should not cost a caller the intact ones.
 
 That trade only works if the caller knows it happened, so anything lost appears under `degraded` — and only then. A response that lost nothing does not carry the key:
 

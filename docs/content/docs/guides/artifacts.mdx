@@ -74,7 +74,7 @@ Artifact("markdown", ("{basename}.md",), kind="text", required=True)
 Requiring one artifact does not change the others. A `required` artifact that a caller filtered out with `keys` is not read and cannot raise.
 
 <Callout type="info" title="Archives use the output directory">
-  Artifact patterns control inline extraction. Archive transports package the complete output directory instead of using the manifest as an archive allowlist.
+  Artifact patterns control inline extraction. Archive transports package the complete output directory instead of using the manifest as an archive allowlist. A `required` pattern still selects the file that must be present in the completed archive; an unsafe, unreadable, or invalid selected member makes packaging fail.
 </Callout>
 
 Continue with [result packaging](/docs/guides/packaging/).

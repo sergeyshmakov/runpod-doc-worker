@@ -34,6 +34,7 @@ from typing import Any, Iterable
 from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
 from runpod_doc_worker.contract import degraded as _degraded
+from runpod_doc_worker.transport import archive_requirements as _requirements
 
 
 # The ways output can be returned. A worker's own schema is what rejects a bad
@@ -81,7 +82,9 @@ def _safe_arcname(name: str) -> bool:
 
 
 def _archive_members(
-    output_dir: Path, report: _degraded.Report | None = None
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
 ) -> list[Path]:
     """Regular files under ``output_dir`` that stay inside it, in a stable order.
 
@@ -119,11 +122,14 @@ def _archive_members(
             report.note(reason=_degraded.UNSAFE_NAME, file=child.name)
             continue
         kept.append(child)
+    _requirements.ensure_included(kept, required_members or {})
     return kept
 
 
 def _build_tarball_bytes(
-    output_dir: Path, report: _degraded.Report | None = None
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
 ) -> bytes:
     """Gzip-tar the engine output dir; returns the raw bytes.
 
@@ -139,19 +145,19 @@ def _build_tarball_bytes(
     leaking in the first place.
     """
     report = _degraded.sink(report)
+    required_members = required_members or {}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
-        for child in _archive_members(output_dir, report):
+        for child in _archive_members(output_dir, report, required_members):
             arcname = child.relative_to(output_dir).as_posix()
+            data = _requirements.read(child, required_members.get(child, ()), report)
+            if data is None:
+                continue
             try:
                 info = tar.gettarinfo(str(child), arcname=arcname)
-                data = child.read_bytes()
             except OSError as exc:
-                report.note(
-                    reason=_degraded.UNREADABLE,
-                    file=child.name,
-                    error_type=type(exc).__name__,
-                )
+                required = required_members.get(child, ())
+                _requirements.unreadable(child, exc, required, report)
                 continue
             # The file can change between metadata and reading. The bytes in
             # hand are authoritative for this archive member.
@@ -161,7 +167,9 @@ def _build_tarball_bytes(
 
 
 def _build_zip_bytes(
-    output_dir: Path, report: _degraded.Report | None = None
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
 ) -> bytes:
     """Zip (DEFLATE) the engine output dir; returns the raw bytes.
 
@@ -174,19 +182,19 @@ def _build_zip_bytes(
     directory.
     """
     report = _degraded.sink(report)
+    required_members = required_members or {}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for child in _archive_members(output_dir, report):
+        for child in _archive_members(output_dir, report, required_members):
             arcname = child.relative_to(output_dir).as_posix()
+            data = _requirements.read(child, required_members.get(child, ()), report)
+            if data is None:
+                continue
             try:
                 info = zipfile.ZipInfo.from_file(child, arcname=arcname)
-                data = child.read_bytes()
             except OSError as exc:
-                report.note(
-                    reason=_degraded.UNREADABLE,
-                    file=child.name,
-                    error_type=type(exc).__name__,
-                )
+                required = required_members.get(child, ())
+                _requirements.unreadable(child, exc, required, report)
                 continue
             zf.writestr(info, data, compress_type=zf.compression)
     return buf.getvalue()
@@ -196,17 +204,20 @@ def _build_archive_bytes(
     output_dir: Path,
     archive_format: str = "tar.gz",
     report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
 ) -> bytes:
     """Build the output archive in the requested container ("tar.gz" or "zip")."""
     if archive_format == "zip":
-        return _build_zip_bytes(output_dir, report)
-    return _build_tarball_bytes(output_dir, report)
+        return _build_zip_bytes(output_dir, report, required_members)
+    return _build_tarball_bytes(output_dir, report, required_members)
 
 
 def package_tarball(
     output_dir: Path,
     archive_format: str = "tar.gz",
     report: _degraded.Report | None = None,
+    *,
+    _required_members: _requirements.RequiredMembers | None = None,
 ) -> str:
     """Base64-encode the output archive for JSON transport.
 
@@ -218,7 +229,7 @@ def package_tarball(
     short of what the engine wrote.
     """
     return base64.b64encode(
-        _build_archive_bytes(output_dir, archive_format, report)
+        _build_archive_bytes(output_dir, archive_format, report, _required_members)
     ).decode("ascii")
 
 
@@ -277,6 +288,8 @@ def package_s3(
     basename: str,
     archive_format: str = "tar.gz",
     report: _degraded.Report | None = None,
+    *,
+    _required_members: _requirements.RequiredMembers | None = None,
 ) -> dict[str, Any]:
     """Upload the output archive to an S3-compatible bucket and return a
     presigned GET URL.
@@ -318,7 +331,9 @@ def package_s3(
     import boto3  # noqa: PLC0415
     from botocore.client import Config  # noqa: PLC0415
 
-    archive_bytes = _build_archive_bytes(output_dir, archive_format, report)
+    archive_bytes = _build_archive_bytes(
+        output_dir, archive_format, report, _required_members
+    )
     ext = "zip" if archive_format == "zip" else "tar.gz"
     content_type = "application/zip" if archive_format == "zip" else "application/gzip"
     # Use a UUID so concurrent jobs with the same basename don't collide.
@@ -413,17 +428,28 @@ def package_results_entry(
         **(metadata or {}),
     }
     report = _degraded.Report()
-    if transport != "inline":
-        # Archives carry the whole output and ignore `formats`, so every
-        # required declaration applies. Reuse Artifact.read for the established
-        # missing, decoding and JSON checks before building or uploading bytes.
-        for artifact in entries:
-            if artifact.required:
-                artifact.read(output_dir, basename, report)
+    required_members = (
+        _requirements.select(entries, output_dir, basename, report)
+        if transport != "inline"
+        else {}
+    )
     if transport == "tarball_b64":
-        entry["tarball_b64"] = package_tarball(output_dir, archive_format, report)
+        entry["tarball_b64"] = package_tarball(
+            output_dir,
+            archive_format,
+            report,
+            _required_members=required_members,
+        )
     elif transport == "s3":
-        entry.update(package_s3(output_dir, basename, archive_format, report))
+        entry.update(
+            package_s3(
+                output_dir,
+                basename,
+                archive_format,
+                report,
+                _required_members=required_members,
+            )
+        )
     else:  # inline
         entry.update(
             package_inline(output_dir, basename, entries, formats=formats, report=report)

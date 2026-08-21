@@ -243,6 +243,9 @@ class Artifact:
         output_dir: Path,
         basename: str,
         report: _degraded.Report | None = None,
+        *,
+        record_unresolvable: bool = True,
+        unresolvable: set[Path] | None = None,
     ) -> list[Path]:
         """Files this artifact resolves to, in pattern order then name order."""
         check_basename(basename)
@@ -261,12 +264,15 @@ class Artifact:
                 what = _paths.kind(p)
                 if what == _paths.UNRESOLVABLE:
                     if p not in reported_unresolvable:
-                        report.note(
-                            reason=_degraded.UNRESOLVABLE,
-                            file=p.name,
-                            artifact=self.key,
-                        )
                         reported_unresolvable.add(p)
+                        if unresolvable is not None:
+                            unresolvable.add(p)
+                        if record_unresolvable:
+                            report.note(
+                                reason=_degraded.UNRESOLVABLE,
+                                file=p.name,
+                                artifact=self.key,
+                            )
                     continue
                 where = _paths.relation(output_dir, p)
                 if where == _paths.OUTSIDE:
@@ -281,12 +287,15 @@ class Artifact:
                     # file rather than failing a job over a traversal that
                     # nothing has evidence of.
                     if p not in reported_unresolvable:
-                        report.note(
-                            reason=_degraded.UNRESOLVABLE,
-                            file=p.name,
-                            artifact=self.key,
-                        )
                         reported_unresolvable.add(p)
+                        if unresolvable is not None:
+                            unresolvable.add(p)
+                        if record_unresolvable:
+                            report.note(
+                                reason=_degraded.UNRESOLVABLE,
+                                file=p.name,
+                                artifact=self.key,
+                            )
                     continue
                 # Skipped only after containment: an outside directory link is
                 # rejected above, while an ordinary in-tree directory remains
@@ -362,6 +371,27 @@ class Artifact:
             except OSError as e:
                 self._note_unreadable(p, e, report)
         return collected
+
+    def validate_buffered(
+        self,
+        path: Path,
+        data: bytes,
+        report: _degraded.Report | None = None,
+    ) -> None:
+        """Validate one single-value artifact from already captured bytes.
+
+        Archive packaging uses this to validate the exact bytes it will ship,
+        rather than validating a file and then reading it again later.
+        """
+        if self.kind not in _SINGLE_VALUE_KINDS:
+            raise ValueError("buffered reads require a single-value artifact")
+        report = _degraded.sink(report)
+        try:
+            text = data.decode("utf-8")
+            if self.kind == JSON:
+                json.loads(text)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._unreadable(path, exc, report)
 
     def _note_unreadable(
         self, path: Path, exc: Exception, report: _degraded.Report

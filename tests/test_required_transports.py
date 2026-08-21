@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import tarfile
+import zipfile
+from pathlib import Path
+
 import pytest
 
 from runpod_doc_worker.contract.artifacts import Artifact, ArtifactError
@@ -12,13 +18,39 @@ REQUIRED_MANIFEST = (
     Artifact("markdown", ("{basename}.md",), kind="text", required=True),
 )
 
+ALL_ARCHIVES = pytest.mark.parametrize(
+    "transport,archive_format",
+    [
+        ("tarball_b64", "tar.gz"),
+        ("tarball_b64", "zip"),
+        ("s3", "tar.gz"),
+        ("s3", "zip"),
+    ],
+)
 
-def _package(transport, output_dir, monkeypatch):
-    package_s3_called = False
 
-    def package_s3(*args, **kwargs):
-        nonlocal package_s3_called
-        package_s3_called = True
+def _package(
+    transport,
+    output_dir,
+    monkeypatch,
+    archive_format="tar.gz",
+    manifest=REQUIRED_MANIFEST,
+):
+    upload_called = False
+
+    def package_s3(
+        output_dir,
+        basename,
+        archive_format="tar.gz",
+        report=None,
+        *,
+        _required_members=None,
+    ):
+        nonlocal upload_called
+        package._build_archive_bytes(
+            output_dir, archive_format, report, _required_members
+        )
+        upload_called = True
         return {"tarball_url": "https://example.test/result.tar.gz"}
 
     monkeypatch.setattr(package, "package_s3", package_s3)
@@ -30,10 +62,11 @@ def _package(transport, output_dir, monkeypatch):
             output_dir=output_dir,
             basename="doc",
             source="b64",
-            manifest=REQUIRED_MANIFEST,
+            manifest=manifest,
+            archive_format=archive_format,
         )
 
-    return call, lambda: package_s3_called
+    return call, lambda: upload_called
 
 
 @pytest.mark.parametrize("transport", ["tarball_b64", "s3"])
@@ -60,8 +93,159 @@ def test_archive_transports_enforce_an_unreadable_required_artifact(
     assert package_s3_called() is False
 
 
-def test_required_preflight_does_not_add_an_artifact_value(tmp_path, monkeypatch):
+def test_required_archive_validation_does_not_add_an_artifact_value(
+    tmp_path, monkeypatch
+):
     (tmp_path / "doc.md").write_text("# body\n", encoding="utf-8")
     call, _ = _package("tarball_b64", tmp_path, monkeypatch)
 
     assert set(call()) == {"basename", "source", "tarball_b64"}
+
+
+@ALL_ARCHIVES
+def test_archive_transports_reject_an_unsafe_required_member(
+    tmp_path, monkeypatch, transport, archive_format
+):
+    (tmp_path / "doc.md").write_text("# body\n", encoding="utf-8")
+    monkeypatch.setattr(package, "_safe_arcname", lambda name: name != "doc.md")
+    call, upload_called = _package(
+        transport, tmp_path, monkeypatch, archive_format
+    )
+
+    with pytest.raises(ArtifactError, match="required.*cannot be archived"):
+        call()
+    assert upload_called() is False
+
+
+@ALL_ARCHIVES
+def test_archive_transports_reject_a_required_member_that_cannot_be_archived(
+    tmp_path, monkeypatch, transport, archive_format
+):
+    required = tmp_path / "doc.md"
+    required.write_text("# body\n", encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(path):
+        if path == required:
+            raise PermissionError("Permission denied")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    call, upload_called = _package(
+        transport, tmp_path, monkeypatch, archive_format
+    )
+
+    with pytest.raises(ArtifactError, match="required.*could not be archived"):
+        call()
+    assert upload_called() is False
+
+
+@ALL_ARCHIVES
+def test_required_fallback_loss_is_reported_once_by_the_archive(
+    tmp_path, monkeypatch, transport, archive_format, capsys
+):
+    try:
+        (tmp_path / "broken.md").symlink_to(tmp_path / "never-written.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    (tmp_path / "doc.md").write_text("# body\n", encoding="utf-8")
+    manifest = (
+        Artifact("markdown", ("broken.md", "doc.md"), kind="text", required=True),
+    )
+    call, _ = _package(
+        transport,
+        tmp_path,
+        monkeypatch,
+        archive_format,
+        manifest,
+    )
+    entry = call()
+
+    captured = capsys.readouterr()
+    assert entry["degraded"] == {
+        "count": 1,
+        "items": [
+            {
+                "artifact": None,
+                "file": "broken.md",
+                "reason": "unresolvable",
+            }
+        ],
+    }
+    assert captured.out.count("response degraded") == 1
+
+
+def test_fatal_unresolvable_required_match_is_logged_once(
+    tmp_path, monkeypatch, capsys
+):
+    try:
+        (tmp_path / "broken.md").symlink_to(tmp_path / "never-written.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    manifest = (
+        Artifact("markdown", ("broken.md",), kind="text", required=True),
+    )
+    call, _ = _package(
+        "tarball_b64", tmp_path, monkeypatch, manifest=manifest
+    )
+
+    with pytest.raises(ArtifactError, match="required and matched no file"):
+        call()
+    captured = capsys.readouterr()
+
+    assert captured.out.count("response degraded") == 1
+    assert '"artifact": "markdown"' in captured.out
+    assert '"reason": "unresolvable"' in captured.out
+
+
+@pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
+def test_required_member_is_read_once_and_the_same_bytes_are_archived(
+    tmp_path, monkeypatch, archive_format
+):
+    required = tmp_path / "doc.md"
+    required.write_bytes(b"# one read\n")
+    real_read_bytes = Path.read_bytes
+    reads = 0
+
+    def read_bytes(path):
+        nonlocal reads
+        if path == required:
+            reads += 1
+            if reads > 1:
+                raise PermissionError("required member was read twice")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    call, _ = _package(
+        "tarball_b64", tmp_path, monkeypatch, archive_format
+    )
+
+    raw = base64.b64decode(call()["tarball_b64"])
+
+    assert reads == 1
+    if archive_format == "zip":
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            assert archive.read("doc.md") == b"# one read\n"
+    else:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            assert archive.extractfile("doc.md").read() == b"# one read\n"
+
+
+@pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
+def test_archive_validates_required_json_from_the_bytes_it_will_write(
+    tmp_path, monkeypatch, archive_format
+):
+    (tmp_path / "doc.json").write_bytes(b"{")
+    manifest = (
+        Artifact("content", ("doc.json",), kind="json", required=True),
+    )
+    call, _ = _package(
+        "tarball_b64",
+        tmp_path,
+        monkeypatch,
+        archive_format,
+        manifest,
+    )
+
+    with pytest.raises(ArtifactError, match="JSONDecodeError"):
+        call()
