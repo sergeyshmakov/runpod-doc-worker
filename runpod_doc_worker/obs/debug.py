@@ -55,13 +55,28 @@ def collect_gpu_info() -> dict[str, Any]:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def _hub_cache_path() -> Path:
+    """The Hub repository cache, using huggingface_hub's environment order."""
+    if hub_cache := os.environ.get("HF_HUB_CACHE", "").strip():
+        return Path(os.path.expanduser(hub_cache))
+
+    if hf_home := os.environ.get("HF_HOME", "").strip():
+        home = Path(os.path.expanduser(hf_home))
+    elif xdg_cache := os.environ.get("XDG_CACHE_HOME", "").strip():
+        home = Path(os.path.expanduser(xdg_cache)) / "huggingface"
+    else:
+        home = Path(os.path.expanduser("~/.cache/huggingface"))
+    return home / "hub"
+
+
 @functools.lru_cache(maxsize=1)
 def find_model_dir() -> str | None:
-    """Locate the model snapshot under HF_HOME so we can prove which weights
+    """Locate the model snapshot in the Hub cache so we can prove which weights
     actually loaded, rather than which ones were meant to.
 
-    Matches ``config.model_globs`` against ``$HF_HOME/hub``; a worker that
-    declares none gets ``None`` and no directory walk.
+    Matches ``config.model_globs`` against ``$HF_HUB_CACHE`` when set, then the
+    cache derived from ``HF_HOME`` or the platform default. A worker that
+    declares no globs gets ``None`` and no directory walk.
 
     Cached because the model dir doesn't change after worker boot and reading
     the cache is non-trivial on a cold or network-backed volume. The cache is
@@ -71,8 +86,7 @@ def find_model_dir() -> str | None:
     globs = _config.active().model_globs
     if not globs:
         return None
-    hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
-    hub = Path(hf_home) / "hub"
+    hub = _hub_cache_path()
     if not hub.is_dir():
         return None
 
@@ -176,6 +190,9 @@ def _resolve_snapshot_path(hub_root: Path, model_id: str) -> dict[str, Any]:
     org, name = model_id.split("/", 1)
     model_root = hub_root / f"models--{org}--{name}"
     out["expected_root"] = str(model_root)
+    if not _paths.within(hub_root, model_root):
+        out["issue"] = "model_root resolves outside the configured Hub cache"
+        return out
     if not model_root.is_dir():
         out["issue"] = "model_root not present (RunPod didn't populate, or wrong casing)"
         return out
@@ -285,12 +302,13 @@ def probe_filesystem() -> dict[str, Any]:
     _list = list_directory
 
     hf_home = os.environ.get("HF_HOME", "")
-    hub_path = Path(hf_home) / "hub" if hf_home else None
+    hub_path = _hub_cache_path()
 
     out: dict[str, Any] = {
         "env": {
             "HF_HOME": hf_home,
             "HF_HUB_CACHE": os.environ.get("HF_HUB_CACHE", ""),
+            "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", ""),
             "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", ""),
             "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", ""),
             "TRANSFORMERS_CACHE": os.environ.get("TRANSFORMERS_CACHE", ""),
@@ -306,7 +324,7 @@ def probe_filesystem() -> dict[str, Any]:
     # Try the tutorial's snapshot resolver for each model this worker cares
     # about. Reports whether refs/main is stale, whether canonical casing is
     # present, and what (if anything) the engine's library would find.
-    if hub_path and hub_path.is_dir():
+    if hub_path.is_dir():
         for model_id in _config.active().probe_model_ids:
             out["resolution_attempts"].append(
                 _resolve_snapshot_path(hub_path, model_id)
@@ -317,7 +335,8 @@ def probe_filesystem() -> dict[str, Any]:
         ("/runpod-volume/huggingface-cache", "/runpod-volume/huggingface-cache"),
         ("/runpod-volume/huggingface-cache/hub", "/runpod-volume/huggingface-cache/hub"),
         ("HF_HOME", hf_home),
-        ("HF_HOME/hub", str(hub_path) if hub_path else ""),
+        ("HF_HOME/hub", str(Path(hf_home) / "hub") if hf_home else ""),
+        ("Hugging Face hub cache (effective)", str(hub_path)),
     ):
         if not path_str:
             out["paths"][label] = "<empty path>"
