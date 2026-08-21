@@ -33,21 +33,30 @@ being dropped, so a caller reading ``response["results"][0]["markdown"]`` gets
 an empty string instead of a KeyError when a page produced no text. Each call
 gets its own copy of that default: a response is a mutable thing handed to a
 caller, and a worker process serves many jobs.
+
+A file that is present but cannot be read yields that same default, and says
+so: the substitution is recorded in a
+:class:`runpod_doc_worker.contract.degraded.Report` as well as logged, because
+an empty value on its own cannot be told apart from a page that had no text.
+An engine that cannot produce a useful response without a particular artifact
+declares it ``required``, and an absent or unreadable one raises
+:class:`ArtifactError` instead.
 """
 
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import glob as _glob
 import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from runpod_doc_worker import paths as _paths
-from runpod_doc_worker.obs import logging as _logging
+from runpod_doc_worker.contract import degraded as _degraded
 
 
 TEXT = "text"
@@ -66,6 +75,45 @@ _UNSET = object()
 # Anything that could steer a formatted pattern out of the directory it was
 # given. Escaping handles glob syntax; separators survive it untouched.
 _BASENAME_SEPARATORS = ("/", "\\")
+
+
+def _glob_hits(output_dir: Path, pattern: str) -> list[Path]:
+    """Pathlib matches, plus broken entries older precise selectors omit.
+
+    Python 3.10 and 3.11 implement a literal path component by asking whether
+    its target exists, so an exact pattern silently loses a dangling link or a
+    symlink loop. Keep ``Path.glob`` as the source of ordinary matches, then
+    probe an exact final component beneath the parents it already matched.
+    This preserves its ordering, duplicates, dotfile rules and recursive
+    symlink behaviour rather than introducing a second glob implementation.
+    """
+    hits = list(output_dir.glob(pattern))
+    parts = Path(pattern).parts
+    if not parts or _glob.has_magic(parts[-1]):
+        return sorted(hits)
+
+    seen = set(hits)
+    parents = (output_dir,)
+    if len(parts) > 1:
+        parents = output_dir.glob(str(Path(*parts[:-1])))
+    for parent in parents:
+        candidate = parent / parts[-1]
+        if candidate in seen:
+            continue
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # The entry is named but cannot be stated; ``kind`` maps the same
+            # error to UNRESOLVABLE so the caller can report it.
+            pass
+        except ValueError:
+            continue
+        if _paths.kind(candidate) == _paths.UNRESOLVABLE:
+            hits.append(candidate)
+            seen.add(candidate)
+    return sorted(hits)
 
 
 def check_basename(basename: str) -> None:
@@ -104,6 +152,18 @@ _DERIVED_DEFAULTS: dict[str, Any] = {
 }
 
 
+class ArtifactError(RuntimeError):
+    """An engine's output could not be turned into a response.
+
+    Separate from the ``ValueError``s this module raises, which mean a manifest
+    is declared wrong — a programmer error, the same on every job until someone
+    fixes it. This one is a condition of one output directory: a file the
+    manifest says the response cannot do without is absent or unreadable on
+    this job and may well be fine on the next. A worker that wants to tell a
+    caller's bad input apart from its own engine's bad output catches this.
+    """
+
+
 @dataclass(frozen=True)
 class Artifact:
     """One response key, and the file(s) behind it.
@@ -114,12 +174,21 @@ class Artifact:
     :param kind: ``text``, ``json`` or ``b64map``.
     :param default: Value when nothing matches. Derived from ``kind`` when not
         given: ``""`` for text, ``{}`` for json and b64map. Copied per read.
+    :param required: Whether a response is worth returning without this. The
+        default, False, is the harness's usual trade: use the declared default
+        when nothing matches; substitute and report when a match is unusable;
+        then ship the rest. Set it for the artifact that *is* the job — the one
+        whose empty value makes the whole response pointless — and an absent or
+        unreadable file raises
+        :class:`ArtifactError` instead. Single-value kinds only; see
+        ``__post_init__`` for why a collection cannot express it.
     """
 
     key: str
     patterns: tuple[str, ...]
     kind: str = TEXT
     default: Any = _UNSET
+    required: bool = False
 
     def __post_init__(self) -> None:
         if not self.key or not isinstance(self.key, str):
@@ -144,6 +213,25 @@ class Artifact:
                     f"artifact {self.key!r}: patterns must be strings; "
                     f"got {type(pattern).__name__}"
                 )
+        if self.required and self.kind == B64MAP:
+            # A collection has no single file to require. "At least one member"
+            # and "every member readable" are different assertions, and neither
+            # is what `required` says elsewhere — so rather than pick one and
+            # surprise whoever assumed the other, refuse it. A per-member
+            # failure stays a degradation.
+            raise ValueError(
+                f"artifact {self.key!r}: required is for {TEXT!r} and {JSON!r} "
+                f"artifacts, which name one file. A {B64MAP!r} collects, so an "
+                f"unreadable member is reported rather than fatal."
+            )
+        if self.required and self.default is not _UNSET:
+            # One of the two is dead code, and which one is not obvious from
+            # the declaration: a required artifact never falls back, so the
+            # default can never be read.
+            raise ValueError(
+                f"artifact {self.key!r}: a required artifact raises rather than "
+                f"falling back, so its default would never be used. Drop one."
+            )
 
     @property
     def missing_value(self) -> Any:
@@ -152,20 +240,71 @@ class Artifact:
             return _DERIVED_DEFAULTS[self.kind]()
         return copy.deepcopy(self.default)
 
-    def matches(self, output_dir: Path, basename: str) -> list[Path]:
+    def matches(
+        self,
+        output_dir: Path,
+        basename: str,
+        report: _degraded.Report | None = None,
+        *,
+        record_unresolvable: bool = True,
+        unresolvable: set[Path] | None = None,
+    ) -> list[Path]:
         """Files this artifact resolves to, in pattern order then name order."""
         check_basename(basename)
+        report = _degraded.sink(report)
         found: list[Path] = []
+        reported_unresolvable: set[Path] = set()
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
-            hits = sorted(p for p in output_dir.glob(expanded) if p.is_file())
-            escapees = [p for p in hits if not _paths.within(output_dir, p)]
-            if escapees:
-                raise ValueError(
-                    f"artifact {self.key!r}: pattern {pattern!r} matched "
-                    f"{escapees[0]}, which is outside the output directory. An "
-                    f"engine reads its own output, not whatever sits next to it."
-                )
+            hits: list[Path] = []
+            for p in _glob_hits(output_dir, expanded):
+                # A dangling link can resolve lexically outside the tree when
+                # its missing target is outside it. Its kind is still unknown,
+                # so report that fact rather than treating it as evidence of an
+                # escape. Existing outside files and directories reach the
+                # containment check below.
+                what = _paths.kind(p)
+                if what == _paths.UNRESOLVABLE:
+                    if p not in reported_unresolvable:
+                        reported_unresolvable.add(p)
+                        if unresolvable is not None:
+                            unresolvable.add(p)
+                        if record_unresolvable:
+                            report.note(
+                                reason=_degraded.UNRESOLVABLE,
+                                file=p.name,
+                                artifact=self.key,
+                            )
+                    continue
+                where = _paths.relation(output_dir, p)
+                if where == _paths.OUTSIDE:
+                    raise ValueError(
+                        f"artifact {self.key!r}: pattern {pattern!r} matched "
+                        f"{p}, which is outside the output directory. An "
+                        f"engine reads its own output, not whatever sits next to it."
+                    )
+                if where == _paths.UNRESOLVABLE:
+                    # Not an escape: the filesystem would not say where this is.
+                    # Unusable either way, so it is dropped like an unreadable
+                    # file rather than failing a job over a traversal that
+                    # nothing has evidence of.
+                    if p not in reported_unresolvable:
+                        reported_unresolvable.add(p)
+                        if unresolvable is not None:
+                            unresolvable.add(p)
+                        if record_unresolvable:
+                            report.note(
+                                reason=_degraded.UNRESOLVABLE,
+                                file=p.name,
+                                artifact=self.key,
+                            )
+                    continue
+                # Skipped only after containment: an outside directory link is
+                # rejected above, while an ordinary in-tree directory remains
+                # a silent non-match.
+                if what == _paths.DIRECTORY:
+                    continue
+                hits.append(p)
             if not hits:
                 continue
             if self.kind in _SINGLE_VALUE_KINDS:
@@ -194,23 +333,35 @@ class Artifact:
                 )
         return found
 
-    def read(self, output_dir: Path, basename: str) -> Any:
+    def read(
+        self,
+        output_dir: Path,
+        basename: str,
+        report: _degraded.Report | None = None,
+    ) -> Any:
         """Value for this artifact, or a fresh default when nothing matched."""
-        hits = self.matches(output_dir, basename)
+        report = _degraded.sink(report)
+        hits = self.matches(output_dir, basename, report)
         if not hits:
+            if self.required:
+                raise ArtifactError(
+                    f"artifact {self.key!r} is required and matched no file. "
+                    f"Patterns tried, against basename {basename!r}: "
+                    f"{', '.join(repr(p) for p in self.patterns)}."
+                )
             return self.missing_value
 
         if self.kind == TEXT:
             try:
                 return hits[0].read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError) as e:
-                return self._unreadable(hits[0], e)
+                return self._unreadable(hits[0], e, report)
 
         if self.kind == JSON:
             try:
                 return json.loads(hits[0].read_text(encoding="utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-                return self._unreadable(hits[0], e)
+                return self._unreadable(hits[0], e, report)
 
         # A collection falls back per member rather than wholesale: a file that
         # vanished between matching and reading should cost the response that
@@ -220,29 +371,70 @@ class Artifact:
             try:
                 collected[p.name] = base64.b64encode(p.read_bytes()).decode("ascii")
             except OSError as e:
-                self._log_unreadable(p, e)
+                self._note_unreadable(p, e, report)
         return collected
 
-    def _log_unreadable(self, path: Path, exc: Exception) -> None:
-        """Say that a file could not be read.
+    def validate_stream(
+        self,
+        path: Path,
+        data: BinaryIO,
+        report: _degraded.Report | None = None,
+    ) -> None:
+        """Validate one single-value artifact from a captured byte stream.
+
+        Archive packaging validates the exact snapshot it will ship without
+        loading every raw archive member into memory.
+        """
+        if self.kind not in _SINGLE_VALUE_KINDS:
+            raise ValueError("stream reads require a single-value artifact")
+        report = _degraded.sink(report)
+        try:
+            if self.kind == JSON:
+                json.load(codecs.getreader("utf-8")(data))
+            else:
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                while chunk := data.read(1024 * 1024):
+                    decoder.decode(chunk)
+                decoder.decode(b"", final=True)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._unreadable(path, exc, report)
+        finally:
+            data.seek(0)
+
+    def _note_unreadable(
+        self, path: Path, exc: Exception, report: _degraded.Report
+    ) -> None:
+        """Record that a file could not be read, and log it.
 
         A truncated or unreadable artifact is the engine's problem to fix, and
         it must not take down a response that is otherwise complete. But a
         response that silently substitutes an empty value is a defect nobody
-        can count, so the substitution is logged: at scale, the log line is the
-        only way this class of failure is visible at all.
+        can count — so the substitution goes into the response as well as the
+        log, because at scale the log line is not what anyone reads.
         """
-        _logging.warning(
-            "artifact unreadable; substituting its default",
-            artifact=self.key,
-            kind=self.kind,
+        report.note(
+            reason=_degraded.UNREADABLE,
             file=path.name,
+            artifact=self.key,
             error_type=type(exc).__name__,
         )
 
-    def _unreadable(self, path: Path, exc: Exception) -> Any:
-        """Log, then fall back to this artifact's default."""
-        self._log_unreadable(path, exc)
+    def _unreadable(
+        self, path: Path, exc: Exception, report: _degraded.Report
+    ) -> Any:
+        """Note, then fall back to this artifact's default — or raise.
+
+        The note happens either way. A required artifact fails the job, and the
+        log line saying which file and which error is the same one an operator
+        needs to work out why, so it is not worth skipping on the path where
+        the response will not survive to carry it.
+        """
+        self._note_unreadable(path, exc, report)
+        if self.required:
+            raise ArtifactError(
+                f"artifact {self.key!r} is required and {path.name} could not be "
+                f"read: {type(exc).__name__}."
+            ) from exc
         return self.missing_value
 
 
@@ -269,12 +461,20 @@ def resolve(
     output_dir: Path,
     basename: str,
     keys: Iterable[str] | None = None,
+    report: _degraded.Report | None = None,
 ) -> dict[str, Any]:
     """Read a manifest into a response dict.
 
     ``keys`` filters which artifacts are read at all — a filtered-out artifact
     is omitted from the result, not present-as-empty, so a caller asking for
     markdown only does not pay to base64 every image.
+
+    ``report`` collects matched files that had to be dropped or substituted on
+    the way. A pattern that simply matches nothing uses its declared default
+    without reporting a degradation. Pass a report when the result is going to
+    a caller: without it the drops are still logged, but the response cannot say
+    a value is a fallback rather than a genuinely empty artifact. See
+    :mod:`runpod_doc_worker.contract.degraded`.
     """
     entries = validate(manifest)
     wanted = set(keys) if keys is not None else None
@@ -292,8 +492,9 @@ def resolve(
                 f"the manifest; it declares "
                 f"{', '.join(art.key for art in entries)}"
             )
+    report = _degraded.sink(report)
     return {
-        art.key: art.read(output_dir, basename)
+        art.key: art.read(output_dir, basename, report)
         for art in entries
         if wanted is None or art.key in wanted
     }

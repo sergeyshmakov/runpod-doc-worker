@@ -9,12 +9,15 @@ rather than emptying it.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import sys
 from pathlib import Path
 
 import pytest
 
+from runpod_doc_worker.contract import degraded
+from runpod_doc_worker.contract.artifacts import Artifact, keys, resolve
 
 # `*` and `?` are legal in POSIX filenames and illegal in Windows ones, so the
 # cases that need such a file on disk only run where one can exist. The escaping
@@ -22,9 +25,6 @@ import pytest
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="filename is not creatable on Windows"
 )
-
-from runpod_doc_worker.contract.artifacts import Artifact, keys, resolve
-
 
 MANIFEST = (
     Artifact("markdown", ("{basename}.md",), kind="text"),
@@ -253,6 +253,73 @@ def test_engine_wildcards_in_the_pattern_still_work(tmp_path):
     assert sorted(resolve(MANIFEST, tmp_path, "doc")["images"]) == ["a.png", "b.png"]
 
 
+def test_an_exact_broken_match_omitted_by_pathlib_is_reported(
+    output_dir, monkeypatch, capsys
+):
+    """Python 3.10 and 3.11 ask `exists()` for an exact glob component, which
+    drops the very broken target packaging needs to report. Simulate that
+    selector on every supported test platform."""
+    real_is_file, real_is_dir = Path.is_file, Path.is_dir
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: False if path.name == "doc.md" else real_is_file(path),
+    )
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path: False if path.name == "doc.md" else real_is_dir(path),
+    )
+    real_glob = Path.glob
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda path, pattern: (
+            iter(()) if pattern == "doc.md" else real_glob(path, pattern)
+        ),
+    )
+
+    report = degraded.Report()
+    out = resolve(MANIFEST, output_dir, "doc", keys=["markdown"], report=report)
+    capsys.readouterr()
+
+    assert out["markdown"] == ""
+    assert report.entry()["items"][0]["reason"] == "unresolvable"
+
+
+def test_overlapping_patterns_report_one_unresolvable_path(
+    output_dir, monkeypatch, capsys
+):
+    manifest = (Artifact("markdown", ("{basename}.md", "*.md")),)
+    monkeypatch.setattr(
+        "runpod_doc_worker.paths.kind",
+        lambda path: "unresolvable" if path.name == "doc.md" else "file",
+    )
+    report = degraded.Report()
+
+    assert resolve(manifest, output_dir, "doc", report=report) == {"markdown": ""}
+    log_lines = capsys.readouterr().out.strip().splitlines()
+    assert report.entry()["count"] == 1
+    assert len(report.entry()["items"]) == 1
+    assert len(log_lines) == 1
+
+
+def test_a_dangling_link_to_an_outside_target_degrades(tmp_path, capsys):
+    job = tmp_path / "job"
+    job.mkdir()
+    try:
+        (job / "doc.md").symlink_to(tmp_path / "never-written.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+    report = degraded.Report()
+
+    assert resolve(MANIFEST, job, "doc", keys=["markdown"], report=report) == {
+        "markdown": ""
+    }
+    capsys.readouterr()
+    assert report.entry()["items"][0]["reason"] == "unresolvable"
+
+
 # -----------------------------------------------------------------------------
 # Ambiguity is an error, not a silent choice
 # -----------------------------------------------------------------------------
@@ -344,6 +411,23 @@ def test_a_pattern_that_escapes_the_output_dir_is_refused(tmp_path):
         resolve(manifest, job, "doc")
 
 
+def test_a_directory_link_outside_is_classified_before_directories_are_skipped(
+    tmp_path,
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    job = tmp_path / "job"
+    job.mkdir()
+    try:
+        (job / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    manifest = (Artifact("markdown", ("linked",), kind="text"),)
+    with pytest.raises(ValueError, match="outside the output directory"):
+        resolve(manifest, job, "doc")
+
+
 def test_an_ordinary_basename_still_resolves(tmp_path):
     (tmp_path / "report-2024_final.md").write_text("fine", encoding="utf-8")
     assert resolve(MANIFEST, tmp_path, "report-2024_final")["markdown"] == "fine"
@@ -393,3 +477,27 @@ def test_the_error_names_what_is_available(output_dir):
 def test_a_subset_of_real_keys_is_still_fine(output_dir):
     out = resolve(MANIFEST, output_dir, "doc", keys=["markdown"])
     assert set(out) == {"markdown"}
+
+
+@pytest.mark.parametrize(
+    "kind,data",
+    [("text", b"# valid text\n"), ("json", b'{"valid": true}')],
+)
+def test_stream_validation_only_requires_python_310_spool_methods(
+    tmp_path, kind, data
+):
+    class Python310Spool:
+        """The 3.10 spool exposes read/seek but no IOBase capability methods."""
+
+        def __init__(self, contents):
+            self.buffer = io.BytesIO(contents)
+
+        def read(self, size=-1):
+            return self.buffer.read(size)
+
+        def seek(self, offset, whence=0):
+            return self.buffer.seek(offset, whence)
+
+    artifact = Artifact("content", ("doc",), kind=kind, required=True)
+
+    artifact.validate_stream(tmp_path / "doc", Python310Spool(data))

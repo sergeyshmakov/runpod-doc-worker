@@ -68,6 +68,7 @@ because the prefix comes from the worker rather than from here.
 | `obs.redact` | one readable shape for the text a failure reports |
 | `obs.debug` | GPU inventory and the filesystem probe payload |
 | `contract.artifacts` | the manifest a worker declares its outputs with |
+| `contract.degraded` | what a response says when it could not carry all of them |
 | `testing.hub` | hub.json checks a worker repo runs in its own suite |
 
 ## Licence

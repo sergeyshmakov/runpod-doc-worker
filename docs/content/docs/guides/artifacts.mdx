@@ -55,12 +55,26 @@ The package rejects:
 
 ## Missing and unreadable files
 
-A missing artifact returns its declared or derived default. Unreadable text or JSON also returns the default and writes a warning. An unreadable `b64map` member is skipped while readable members remain in the result.
+A missing artifact returns its declared or derived default. Unreadable text or JSON also returns the default, and an unreadable `b64map` member is skipped while readable members remain in the result.
+
+A default returned because no file matched is the artifact's declared normal absence and does not add a degradation report. A substitution caused by an unreadable or invalid matched file, and every skipped `b64map` member, is recorded in a [degradation report](/docs/guides/packaging/#degraded-responses) as well as logged. Mark the artifact `required` when a no-match result must fail instead of looking like an empty value.
 
 Filtering with `keys` omits other keys completely. It does not emit them with empty values.
 
+## Require the artifact the response exists for
+
+Substituting a default is the right trade for part of a response and the wrong one for the whole point of it. Mark that artifact `required` and an absent or unreadable file raises `ArtifactError` instead:
+
+```python
+Artifact("markdown", ("{basename}.md",), kind="text", required=True)
+```
+
+`ArtifactError` is a `RuntimeError`, not a `ValueError`, so a worker can tell bad engine output apart from the manifest being declared wrong. Two declarations are refused: `required` on a `b64map`, which has no single file to require, and `required` alongside an explicit `default`, which could never be read.
+
+Requiring one artifact does not change the others. A `required` artifact that a caller filtered out with `keys` is not read and cannot raise.
+
 <Callout type="info" title="Archives use the output directory">
-  Artifact patterns control inline extraction. Archive transports package the complete output directory instead of using the manifest as an archive allowlist.
+  Artifact patterns control inline extraction. Archive transports package the complete output directory instead of using the manifest as an archive allowlist. A `required` pattern still selects the file that must be present in the completed archive; an unsafe, unreadable, or invalid selected member makes packaging fail.
 </Callout>
 
 Continue with [result packaging](/docs/guides/packaging/).

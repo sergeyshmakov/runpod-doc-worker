@@ -13,6 +13,12 @@ output directory regardless, so `formats` is a no-op on those.
 
 What "the declared artifacts" means is the engine's to say; it hands in a
 manifest of :class:`runpod_doc_worker.contract.artifacts.Artifact`.
+
+Anything packaging had to leave out — an unreadable artifact, a member the
+archive cannot carry — is reported on the entry under ``degraded``, and only
+when there is something to report. See
+:mod:`runpod_doc_worker.contract.degraded` for why that lives in the response
+rather than only in the log.
 """
 
 from __future__ import annotations
@@ -20,14 +26,17 @@ from __future__ import annotations
 import base64
 import io
 import os
+import stat
 import tarfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
-from runpod_doc_worker.obs import logging as _logging
+from runpod_doc_worker.contract import degraded as _degraded
+from runpod_doc_worker.transport import archive_requirements as _requirements
 
 
 # The ways output can be returned. A worker's own schema is what rejects a bad
@@ -39,7 +48,7 @@ VALID_TRANSPORTS = frozenset({"tarball_b64", "inline", "s3"})
 # its artifact manifest may supply them: both are merged into the entry, so
 # either could otherwise replace the field that says which document this is and
 # where it came from.
-RESERVED_ENTRY_KEYS = frozenset({"basename", "source"})
+RESERVED_ENTRY_KEYS = frozenset({"basename", "source", _degraded.ENTRY_KEY})
 
 
 def _refuse_reserved(what: str, keys: set[str]) -> None:
@@ -47,7 +56,7 @@ def _refuse_reserved(what: str, keys: set[str]) -> None:
     if claimed:
         raise ValueError(
             f"{what} may not contain {', '.join(sorted(claimed))} — the harness "
-            f"owns {' and '.join(sorted(RESERVED_ENTRY_KEYS))} on a results entry"
+            f"owns {', '.join(sorted(RESERVED_ENTRY_KEYS))} on a results entry"
         )
 
 
@@ -74,35 +83,56 @@ def _safe_arcname(name: str) -> bool:
     return not any(part in ("", ".", "..") for part in parts)
 
 
-def _archive_members(output_dir: Path) -> list[Path]:
+def _archive_members(
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
+) -> list[Path]:
     """Regular files under ``output_dir`` that stay inside it, in a stable order.
 
     An entry that escapes is skipped rather than raised on: it is an artefact
     of how the engine laid out its own directory, and dropping a job over it
-    would be a worse trade than shipping the rest with a line saying what was
-    left out.
+    would be a worse trade than shipping the rest. What was left out goes into
+    ``report``, because an archive missing a file the engine wrote is otherwise
+    indistinguishable from one the engine never wrote it into.
     """
+    report = _degraded.sink(report)
     kept: list[Path] = []
     for child in sorted(output_dir.rglob("*")):
-        if not child.is_file():
+        what = _paths.kind(child)
+        if what == _paths.UNRESOLVABLE:
+            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
             continue
-        if _paths.escapes(output_dir, child):
-            _logging.warning(
-                "archive member points outside the output directory; skipping it",
+        where = _paths.relation(output_dir, child)
+        if where != _paths.INSIDE:
+            # Two different problems, and calling the second one an escape sends
+            # a reader hunting a traversal that nothing has evidence of.
+            report.note(
+                reason=(
+                    _degraded.OUTSIDE_OUTPUT_DIR
+                    if where == _paths.OUTSIDE
+                    else _degraded.UNRESOLVABLE
+                ),
                 file=child.name,
             )
+            continue
+        # Skip only after containment: an ordinary in-tree directory is a
+        # silent non-member, but an outside directory link is reported above.
+        if what == _paths.DIRECTORY:
             continue
         if not _safe_arcname(child.relative_to(output_dir).as_posix()):
-            _logging.warning(
-                "archive member name is unsafe to extract; skipping it",
-                file=child.name,
-            )
+            report.note(reason=_degraded.UNSAFE_NAME, file=child.name)
             continue
         kept.append(child)
+    _requirements.ensure_included(kept, required_members or {})
     return kept
 
 
-def _build_tarball_bytes(output_dir: Path) -> bytes:
+def _build_tarball_bytes(
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
+) -> bytes:
     """Gzip-tar the engine output dir; returns the raw bytes.
 
     ``dereference=True`` stores the bytes behind a symlink rather than the link
@@ -116,14 +146,44 @@ def _build_tarball_bytes(output_dir: Path) -> bytes:
     belong together: dereferencing an unfiltered list is how the zip path was
     leaking in the first place.
     """
+    report = _degraded.sink(report)
+    required_members = required_members or {}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
-        for child in _archive_members(output_dir):
-            tar.add(child, arcname=child.relative_to(output_dir).as_posix())
+        for child in _archive_members(output_dir, report, required_members):
+            arcname = child.relative_to(output_dir).as_posix()
+            required = required_members.get(child, ())
+
+            def describe(source: BinaryIO) -> tarfile.TarInfo:
+                info = tar.gettarinfo(fileobj=source, arcname=arcname)
+                if info is None or not info.isreg():
+                    raise IsADirectoryError(f"archive member is not a regular file: {child}")
+                return info
+
+            with _requirements.capture(child, required, report, describe) as snapshot:
+                if snapshot is None:
+                    continue
+                snapshot.metadata.size = snapshot.size
+                tar.addfile(snapshot.metadata, snapshot.data)
     return buf.getvalue()
 
 
-def _build_zip_bytes(output_dir: Path) -> bytes:
+def _zip_info(source: BinaryIO, arcname: str, child: Path) -> zipfile.ZipInfo:
+    """Describe a regular ZIP member from its already-open source."""
+    source_stat = os.fstat(source.fileno())
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise IsADirectoryError(f"archive member is not a regular file: {child}")
+    info = zipfile.ZipInfo(arcname, time.localtime(source_stat.st_mtime)[:6])
+    info.external_attr = (source_stat.st_mode & 0xFFFF) << 16
+    info.file_size = source_stat.st_size
+    return info
+
+
+def _build_zip_bytes(
+    output_dir: Path,
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
+) -> bytes:
     """Zip (DEFLATE) the engine output dir; returns the raw bytes.
 
     Used when a caller requests ``archive_format="zip"``, which is what a
@@ -134,27 +194,59 @@ def _build_zip_bytes(output_dir: Path) -> bytes:
     files under the same names, and neither carries a link out of the output
     directory.
     """
+    report = _degraded.sink(report)
+    required_members = required_members or {}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for child in _archive_members(output_dir):
-            zf.write(child, arcname=child.relative_to(output_dir).as_posix())
+        for child in _archive_members(output_dir, report, required_members):
+            arcname = child.relative_to(output_dir).as_posix()
+            required = required_members.get(child, ())
+
+            def describe(source: BinaryIO) -> zipfile.ZipInfo:
+                return _zip_info(source, arcname, child)
+
+            with _requirements.capture(child, required, report, describe) as snapshot:
+                if snapshot is None:
+                    continue
+                snapshot.metadata.file_size = snapshot.size
+                snapshot.metadata.compress_type = zf.compression
+                with zf.open(snapshot.metadata, mode="w") as destination:
+                    while chunk := snapshot.data.read(_requirements._COPY_CHUNK_BYTES):
+                        destination.write(chunk)
     return buf.getvalue()
 
 
-def _build_archive_bytes(output_dir: Path, archive_format: str = "tar.gz") -> bytes:
+def _build_archive_bytes(
+    output_dir: Path,
+    archive_format: str = "tar.gz",
+    report: _degraded.Report | None = None,
+    required_members: _requirements.RequiredMembers | None = None,
+) -> bytes:
     """Build the output archive in the requested container ("tar.gz" or "zip")."""
     if archive_format == "zip":
-        return _build_zip_bytes(output_dir)
-    return _build_tarball_bytes(output_dir)
+        return _build_zip_bytes(output_dir, report, required_members)
+    return _build_tarball_bytes(output_dir, report, required_members)
 
 
-def package_tarball(output_dir: Path, archive_format: str = "tar.gz") -> str:
+def package_tarball(
+    output_dir: Path,
+    archive_format: str = "tar.gz",
+    report: _degraded.Report | None = None,
+    *,
+    _required_members: _requirements.RequiredMembers | None = None,
+) -> str:
     """Base64-encode the output archive for JSON transport.
 
     ``archive_format`` selects the container ("tar.gz" default, or "zip"); the
     response key is ``tarball_b64`` regardless.
+
+    ``report`` collects any member the archive could not carry. Without one the
+    omissions are still logged, but the response cannot say the archive is
+    short of what the engine wrote.
     """
-    return base64.b64encode(_build_archive_bytes(output_dir, archive_format)).decode("ascii")
+    return base64.b64encode(
+        _build_archive_bytes(output_dir, archive_format, report, _required_members)
+    ).decode("ascii")
 
 
 def package_inline(
@@ -162,6 +254,7 @@ def package_inline(
     basename: str,
     manifest: Iterable[_artifacts.Artifact],
     formats: Iterable[str] | None = None,
+    report: _degraded.Report | None = None,
 ) -> dict[str, Any]:
     """Assemble the requested artifacts from the engine's output dir.
 
@@ -170,7 +263,9 @@ def package_inline(
     omitted, not present-as-empty. An artifact that is asked for but produced
     nothing appears with its declared default.
     """
-    return _artifacts.resolve(manifest, output_dir, basename, keys=formats)
+    return _artifacts.resolve(
+        manifest, output_dir, basename, keys=formats, report=report
+    )
 
 
 # Default presigned URL lifetime for `transport: "s3"` uploads.
@@ -204,7 +299,14 @@ def presign_ttl_seconds() -> int:
     return max(MIN_PRESIGN_TTL_SECONDS, min(MAX_PRESIGN_TTL_SECONDS, ttl))
 
 
-def package_s3(output_dir: Path, basename: str, archive_format: str = "tar.gz") -> dict[str, Any]:
+def package_s3(
+    output_dir: Path,
+    basename: str,
+    archive_format: str = "tar.gz",
+    report: _degraded.Report | None = None,
+    *,
+    _required_members: _requirements.RequiredMembers | None = None,
+) -> dict[str, Any]:
     """Upload the output archive to an S3-compatible bucket and return a
     presigned GET URL.
 
@@ -245,7 +347,9 @@ def package_s3(output_dir: Path, basename: str, archive_format: str = "tar.gz") 
     import boto3  # noqa: PLC0415
     from botocore.client import Config  # noqa: PLC0415
 
-    archive_bytes = _build_archive_bytes(output_dir, archive_format)
+    archive_bytes = _build_archive_bytes(
+        output_dir, archive_format, report, _required_members
+    )
     ext = "zip" if archive_format == "zip" else "tar.gz"
     content_type = "application/zip" if archive_format == "zip" else "application/gzip"
     # Use a UUID so concurrent jobs with the same basename don't collide.
@@ -301,9 +405,16 @@ def package_results_entry(
 
     ``metadata`` is where an engine puts whatever it counts (pages requested,
     regions found, sheets read). The harness does not interpret it, but it does
-    own ``basename`` and ``source``, so metadata may not claim those keys —
-    silently losing the field that says where a document came from is worse
-    than a loud rejection at the call site.
+    own the keys in :data:`RESERVED_ENTRY_KEYS`, so metadata may not claim
+    those — silently losing the field that says where a document came from, or
+    the one that says the response is incomplete, is worse than a loud
+    rejection at the call site.
+
+    Anything the packaging had to drop or substitute appears under
+    ``degraded``, and only then: a job that lost nothing returns exactly what
+    it always did. This is the entry point that attaches it, because it is the
+    only one that builds something a caller reads. See
+    :mod:`runpod_doc_worker.contract.degraded`.
 
     ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
     unrecognised value raises: returning a successful entry carrying a
@@ -332,12 +443,37 @@ def package_results_entry(
         "source": source,
         **(metadata or {}),
     }
+    report = _degraded.Report()
+    required_members = (
+        _requirements.select(entries, output_dir, basename, report)
+        if transport != "inline"
+        else {}
+    )
     if transport == "tarball_b64":
-        entry["tarball_b64"] = package_tarball(output_dir, archive_format)
+        entry["tarball_b64"] = package_tarball(
+            output_dir,
+            archive_format,
+            report,
+            _required_members=required_members,
+        )
     elif transport == "s3":
-        entry.update(package_s3(output_dir, basename, archive_format))
+        entry.update(
+            package_s3(
+                output_dir,
+                basename,
+                archive_format,
+                report,
+                _required_members=required_members,
+            )
+        )
     else:  # inline
         entry.update(
-            package_inline(output_dir, basename, entries, formats=formats)
+            package_inline(output_dir, basename, entries, formats=formats, report=report)
         )
+    # Last, so a manifest or metadata key cannot land on top of it. Both are
+    # refused above, but the ordering is what makes that a check rather than
+    # the only thing standing between a caller and a response that says it is
+    # complete when it is not.
+    if (lost := report.entry()) is not None:
+        entry[_degraded.ENTRY_KEY] = lost
     return entry

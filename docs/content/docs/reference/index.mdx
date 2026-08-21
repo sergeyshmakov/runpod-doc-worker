@@ -48,12 +48,25 @@ From `runpod_doc_worker.contract.artifacts`:
 
 | Name | Purpose |
 | --- | --- |
-| `Artifact(key, patterns, kind, default)` | Declare one response field |
+| `Artifact(key, patterns, kind, default, required)` | Declare one response field |
+| `ArtifactError` | Raised when a `required` artifact is absent or unreadable |
 | `validate(manifest)` | Validate the manifest and return a tuple |
-| `resolve(manifest, output_dir, basename, keys=None)` | Read selected artifacts |
+| `resolve(manifest, output_dir, basename, keys=None, report=None)` | Read selected artifacts |
 | `keys(manifest)` | List declared keys in order |
 
-Valid kinds are `text`, `json`, and `b64map`.
+Valid kinds are `text`, `json`, and `b64map`. `required` applies to `text` and `json` only.
+
+From `runpod_doc_worker.contract.degraded`:
+
+| Name | Purpose |
+| --- | --- |
+| `Report()` | Collect what packaging had to drop or substitute |
+| `Report.note(reason=..., file=..., artifact=None, error_type=None)` | Record one loss and log it |
+| `Report.entry()` | The `degraded` value, or `None` when nothing was lost |
+| `Report.count` | Everything noted, including items the report does not list |
+| `ENTRY_KEY`, `MAX_ITEMS`, `VALID_REASONS` | The response key, the item cap, the reason vocabulary |
+
+Reasons are `unreadable`, `unresolvable`, `outside_output_dir`, and `unsafe_name`.
 
 ## Result packaging
 
@@ -63,8 +76,8 @@ From `runpod_doc_worker.transport.package`:
 | --- | --- |
 | `package_results_entry(...)` | Build one transport-specific result dictionary |
 | `package_inline(...)` | Resolve selected manifest values |
-| `package_tarball(output_dir, archive_format="tar.gz")` | Return a base64 archive |
-| `package_s3(output_dir, basename, archive_format="tar.gz")` | Upload and presign an archive |
+| `package_tarball(output_dir, archive_format="tar.gz", report=None)` | Return a base64 archive |
+| `package_s3(output_dir, basename, archive_format="tar.gz", report=None)` | Upload and presign an archive |
 | `presign_ttl_seconds()` | Read and clamp the S3 URL lifetime |
 
 Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive formats are `tar.gz` and `zip`.

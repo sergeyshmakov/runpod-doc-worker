@@ -5,7 +5,8 @@ Subpackages:
                packaging (tarball / inline / s3)
   obs        — failure-text redaction, structured logging, GPU + filesystem
                debug probes
-  contract   — the artifact manifest a worker declares its outputs with
+  contract   — the artifact manifest a worker declares its outputs with, and
+               what a response says when it could not carry all of it
   testing    — checks a worker repo can reuse in its own suite
 
 A worker supplies the engine and the entry point; see :mod:`runpod_doc_worker.config`

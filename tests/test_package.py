@@ -14,10 +14,12 @@ import json
 import sys
 import tarfile
 import zipfile
+from pathlib import Path
 
 import pytest
 
 from runpod_doc_worker.contract.artifacts import Artifact
+from runpod_doc_worker.transport import archive_requirements
 from runpod_doc_worker.transport import package
 
 
@@ -301,6 +303,77 @@ def test_tar_does_not_carry_a_symlink_escaping_the_output(symlinked_output):
         names = {m.name for m in tar.getmembers()}
         assert "doc.md" in names
         assert "leak.txt" not in names
+
+
+def test_an_outside_directory_link_is_reported_before_directories_are_skipped(
+    output_dir,
+):
+    outside = output_dir.parent / f"{output_dir.name}-outside"
+    outside.mkdir()
+    try:
+        (output_dir / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    entry = _entry(output_dir, transport="tarball_b64")
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "linked"
+    assert item["reason"] == "outside_output_dir"
+
+
+def test_a_dangling_archive_link_outside_is_unresolvable(output_dir):
+    try:
+        (output_dir / "dangling").symlink_to(output_dir.parent / "never-written")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    entry = _entry(output_dir, transport="tarball_b64")
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "dangling"
+    assert item["reason"] == "unresolvable"
+
+
+@pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
+def test_an_archive_skips_a_member_that_fails_while_reading(
+    output_dir, monkeypatch, archive_format
+):
+    real_read_chunk = archive_requirements._read_chunk
+    failed = False
+
+    def read_chunk(source):
+        nonlocal failed
+        if Path(source.name).name == "doc_middle.json" and failed:
+            raise PermissionError("Permission denied")
+        chunk = real_read_chunk(source)
+        if Path(source.name).name == "doc_middle.json":
+            failed = True
+        return chunk
+
+    monkeypatch.setattr(archive_requirements, "_read_chunk", read_chunk)
+    entry = _entry(
+        output_dir, transport="tarball_b64", archive_format=archive_format
+    )
+
+    (item,) = entry["degraded"]["items"]
+    assert item["file"] == "doc_middle.json"
+    assert item["reason"] == "unreadable"
+    assert item["error_type"] == "PermissionError"
+
+    raw = base64.b64decode(entry["tarball_b64"])
+    if archive_format == "zip":
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            names = set(archive.namelist())
+            assert archive.read("doc.md") == b"# hello\n"
+            assert archive.read("images/fig1.png").endswith(b"fig1")
+            assert archive.getinfo("doc.md").compress_type == zipfile.ZIP_DEFLATED
+    else:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            names = {member.name for member in archive.getmembers()}
+            assert archive.extractfile("doc.md").read() == b"# hello\n"
+            assert archive.extractfile("images/fig1.png").read().endswith(b"fig1")
+    assert "doc_middle.json" not in names
 
 
 def test_a_symlink_staying_inside_the_output_is_kept(tmp_path):
