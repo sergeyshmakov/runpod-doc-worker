@@ -395,6 +395,7 @@ def package_results_entry(
     manifest: Iterable[_artifacts.Artifact],
     archive_format: str = "tar.gz",
     metadata: dict[str, Any] | None = None,
+    report: _degraded.Report | None = None,
 ) -> dict[str, Any]:
     """Build one entry of the ``results: [...]`` response array.
 
@@ -415,6 +416,12 @@ def package_results_entry(
     it always did. This is the entry point that attaches it, because it is the
     only one that builds something a caller reads. See
     :mod:`runpod_doc_worker.contract.degraded`.
+
+    Pass ``report`` to hold on to that record. The entry carries it either way;
+    what an own report buys is not having to read a response back to find out
+    what it lost — which is the wrong shape for a worker that wants to count
+    degradations as they happen, or to attach them to the span the job already
+    has open.
 
     ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
     unrecognised value raises: returning a successful entry carrying a
@@ -443,7 +450,7 @@ def package_results_entry(
         "source": source,
         **(metadata or {}),
     }
-    report = _degraded.Report()
+    report = _degraded.sink(report)
     required_members = (
         _requirements.select(entries, output_dir, basename, report)
         if transport != "inline"
