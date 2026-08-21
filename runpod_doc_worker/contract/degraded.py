@@ -69,7 +69,7 @@ MAX_ITEMS = 50
 
 
 class Report:
-    """The drops behind one response entry.
+    """The drops observed while building one or more response entries.
 
     Deliberately defines no ``__bool__``, so an instance is always truthy. The
     obvious way to write the optional-argument default is ``report or
@@ -121,6 +121,15 @@ class Report:
     def count(self) -> int:
         """Everything noted, including what the report does not describe."""
         return self._count
+
+    def _extend(self, other: Report) -> None:
+        """Accumulate ``other`` without logging its losses a second time."""
+        if other is self:
+            raise ValueError("a degradation report cannot extend itself")
+        remaining = MAX_ITEMS - len(self._items)
+        if remaining > 0:
+            self._items.extend(other._items[:remaining])
+        self._count += other._count
 
     def entry(self) -> dict[str, Any] | None:
         """The value for :data:`ENTRY_KEY`, or None when nothing was lost.

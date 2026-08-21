@@ -631,6 +631,24 @@ def test_a_report_carried_across_two_entries_accumulates(output_dir, capsys):
     assert report.count == 2
 
 
+def test_a_shared_report_does_not_contaminate_a_later_intact_entry(
+    output_dir, capsys
+):
+    """The supplied report is job-wide, but ``degraded`` is per entry."""
+    blocks = output_dir / "doc_blocks.json"
+    blocks.write_bytes(b"{not json")
+    report = degraded.Report()
+
+    first = _entry(output_dir, report=report)
+    blocks.write_bytes(b'[{"type": "text"}]')
+    second = _entry(output_dir, report=report)
+    capsys.readouterr()
+
+    assert first["degraded"]["count"] == 1
+    assert report.count == 1
+    assert "degraded" not in second
+
+
 def test_the_log_message_is_public_and_is_what_gets_logged(capsys):
     """Workers document this string to their operators as the thing to alert
     on, so it is a contract. A test here is what makes changing it fail

@@ -61,7 +61,7 @@ From `runpod_doc_worker.contract.degraded`:
 
 | Name | Purpose |
 | --- | --- |
-| `Report()` | Collect what packaging had to drop or substitute |
+| `Report()` | Collect what packaging had to drop or substitute across one or more entries |
 | `Report.note(reason=..., file=..., artifact=None, error_type=None)` | Record one loss and log it |
 | `Report.entry()` | The `degraded` value, or `None` when nothing was lost |
 | `Report.count` | Everything noted, including items the report does not list |
@@ -76,7 +76,7 @@ From `runpod_doc_worker.transport.package`:
 
 | Function | Purpose |
 | --- | --- |
-| `package_results_entry(..., report=None)` | Build one transport-specific result dictionary. Pass a `Report` to keep what it lost |
+| `package_results_entry(..., report=None)` | Build one transport-specific result dictionary. Pass a job-wide `Report`; the returned `degraded` field remains entry-local |
 | `package_inline(...)` | Resolve selected manifest values |
 | `package_tarball(output_dir, archive_format="tar.gz", report=None)` | Return a base64 archive |
 | `package_s3(output_dir, basename, archive_format="tar.gz", report=None)` | Upload and presign an archive |
