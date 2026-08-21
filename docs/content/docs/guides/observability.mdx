@@ -83,12 +83,17 @@ So the worker owns the gate: it names the variable its operators set, picks the 
 ```python
 import os
 
-_TRUTHY = ("1", "true", "yes", "on")
+_NOT_DISABLED = ("0", "false", "no", "off")
 
 
 def _probe_allowed() -> bool:
     """Whatever this endpoint's operators already set. The name is yours."""
-    return os.environ.get("ACME_DISABLE_PROBE", "").strip().lower() not in _TRUTHY
+    value = os.environ.get("ACME_DISABLE_PROBE", "").strip().lower()
+    if not value:
+        return True                 # unset: this worker's own default
+    # Anything that is not an explicit "not disabled" denies, so an operator
+    # typo leaves the payload unexposed rather than exposed.
+    return value in _NOT_DISABLED
 
 
 if job_input.get("probe") is True:
@@ -96,6 +101,8 @@ if job_input.get("probe") is True:
         raise ValueError("probe is disabled on this endpoint")
     return {"probe": debug.probe_filesystem()}
 ```
+
+Two things that predicate is careful about, both inherited from what this package used to do. An unset variable is not the same as a recognised falsey one — only the first should fall through to the worker's own default. And an unrecognised non-blank value denies: `ACME_DISABLE_PROBE=maybe` disabled the probe in 0.4.x, and a migration that turns a typo into an exposed filesystem dump is not one that preserved anything.
 
 Keeping the old variable name is the point: an operator's existing setting keeps meaning what it meant, and it stops being a name a dependency can change.
 
