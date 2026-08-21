@@ -27,7 +27,7 @@ def within(root: Path, candidate: Path) -> bool:
     try:
         root_resolved = root.resolve()
         candidate_resolved = candidate.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
     return (
         candidate_resolved == root_resolved
