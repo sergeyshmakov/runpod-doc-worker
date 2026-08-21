@@ -76,6 +76,23 @@ _UNSET = object()
 _BASENAME_SEPARATORS = ("/", "\\")
 
 
+def _glob_hits(output_dir: Path, pattern: str) -> list[Path]:
+    """Pathlib matches, plus broken entries older precise selectors omit.
+
+    Python 3.10 and 3.11 implement a literal path component by asking whether
+    its target exists, so an exact pattern silently loses a dangling link or a
+    symlink loop. ``glob`` includes broken symlinks. Keep ``Path.glob`` as the
+    source of ordinary matches (including dotfiles), and take from ``glob``
+    only additional paths that the filesystem will not describe.
+    """
+    hits = set(output_dir.glob(pattern))
+    for relative in _glob.iglob(pattern, root_dir=output_dir, recursive=True):
+        candidate = output_dir / relative
+        if candidate not in hits and _paths.kind(candidate) == _paths.UNRESOLVABLE:
+            hits.add(candidate)
+    return sorted(hits)
+
+
 def check_basename(basename: str) -> None:
     """Reject a basename that could read outside the output directory.
 
@@ -212,7 +229,7 @@ class Artifact:
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
             hits: list[Path] = []
-            for p in sorted(output_dir.glob(expanded)):
+            for p in _glob_hits(output_dir, expanded):
                 # Asked before the containment check, and not as `is_file()`:
                 # that answers False for a loop and for a link to nothing, the
                 # same False it gives a directory, so filtering on it would drop

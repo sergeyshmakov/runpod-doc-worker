@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from runpod_doc_worker.contract import degraded
+from runpod_doc_worker.contract.artifacts import Artifact, keys, resolve
 
 # `*` and `?` are legal in POSIX filenames and illegal in Windows ones, so the
 # cases that need such a file on disk only run where one can exist. The escaping
@@ -22,9 +24,6 @@ import pytest
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="filename is not creatable on Windows"
 )
-
-from runpod_doc_worker.contract.artifacts import Artifact, keys, resolve
-
 
 MANIFEST = (
     Artifact("markdown", ("{basename}.md",), kind="text"),
@@ -251,6 +250,40 @@ def test_engine_wildcards_in_the_pattern_still_work(tmp_path):
     (images / "a.png").write_bytes(b"a")
     (images / "b.png").write_bytes(b"b")
     assert sorted(resolve(MANIFEST, tmp_path, "doc")["images"]) == ["a.png", "b.png"]
+
+
+def test_an_exact_broken_match_omitted_by_pathlib_is_reported(
+    output_dir, monkeypatch, capsys
+):
+    """Python 3.10 and 3.11 ask `exists()` for an exact glob component, which
+    drops the very broken target packaging needs to report. Simulate that
+    selector on every supported test platform."""
+    real_is_file, real_is_dir = Path.is_file, Path.is_dir
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: False if path.name == "doc.md" else real_is_file(path),
+    )
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path: False if path.name == "doc.md" else real_is_dir(path),
+    )
+    real_glob = Path.glob
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda path, pattern: (
+            iter(()) if pattern == "doc.md" else real_glob(path, pattern)
+        ),
+    )
+
+    report = degraded.Report()
+    out = resolve(MANIFEST, output_dir, "doc", keys=["markdown"], report=report)
+    capsys.readouterr()
+
+    assert out["markdown"] == ""
+    assert report.entry()["items"][0]["reason"] == "unresolvable"
 
 
 # -----------------------------------------------------------------------------

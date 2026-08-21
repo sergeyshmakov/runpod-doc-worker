@@ -71,9 +71,9 @@ def kind(path: Path) -> str:
     a permission denial on the way to the file, which escapes a caller that was
     only asking about a type.
 
-    Both callers here reach this via a glob, which yields such an entry rather
-    than hiding it: glob's literal selector tests ``lexists``, and that does not
-    follow the link.
+    Both callers here reach this via directory matching. Artifact matching
+    supplements ``Path.glob`` with ``glob.iglob`` because Python 3.10 and 3.11
+    omit a broken exact-name match; the latter includes broken symlinks.
     """
     try:
         if path.is_dir():

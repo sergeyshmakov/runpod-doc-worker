@@ -473,8 +473,8 @@ def test_required_defaults_to_off():
 # ELOOP and ENOENT are both in pathlib's ignored errnos — which is the same
 # False it gives an ordinary directory. Dropping everything that is not a file
 # therefore drops the broken ones silently, alongside the directories that were
-# meant to be skipped. glob still yields them: its literal selector tests
-# `lexists`, which does not follow the link.
+# meant to be skipped. The `glob` module still yields them; unlike pathlib's
+# precise selector on Python 3.10 and 3.11, it includes broken symlinks.
 # -----------------------------------------------------------------------------
 
 def _undescribable(monkeypatch, name: str) -> None:
