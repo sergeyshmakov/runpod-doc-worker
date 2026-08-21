@@ -1,0 +1,43 @@
+name: Commit lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  commitlint:
+    name: Lint commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Need full history to lint the whole PR's range.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: npm
+
+      - name: Install commitlint
+        run: npm ci || npm install
+
+      - name: Validate commits
+        # On a PR: lint every commit from the merge base.
+        # On a push to main: lint only the new commits.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FROM="${{ github.event.pull_request.base.sha }}"
+            TO="${{ github.event.pull_request.head.sha }}"
+          else
+            FROM="${{ github.event.before }}"
+            TO="${{ github.sha }}"
+          fi
+          if [ -z "$FROM" ] || [ "$FROM" = "0000000000000000000000000000000000000000" ]; then
+            echo "No prior ref — linting last commit only"
+            npx --no -- commitlint --from HEAD~1 --to HEAD --verbose
+          else
+            npx --no -- commitlint --from "$FROM" --to "$TO" --verbose
+          fi

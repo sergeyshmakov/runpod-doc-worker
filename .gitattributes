@@ -1,0 +1,23 @@
+# Force LF line endings for all text files, regardless of platform.
+# Without `eol=lf`, Windows users with core.autocrlf=true still get CRLF on
+# checkout — which breaks shell scripts and produces noisy diffs.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF; CRLF breaks the shebang on Linux.
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Explicit binary markings so Git never line-ending-normalizes these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.svg  text eol=lf
+*.pdf  binary
+*.gz   binary
+*.tgz  binary
+*.zip  binary
+*.whl  binary
+*.woff binary
+*.woff2 binary
