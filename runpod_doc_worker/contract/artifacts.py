@@ -46,13 +46,14 @@ declares it ``required``, and an absent or unreadable one raises
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import glob as _glob
 import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import degraded as _degraded
@@ -373,26 +374,32 @@ class Artifact:
                 self._note_unreadable(p, e, report)
         return collected
 
-    def validate_buffered(
+    def validate_stream(
         self,
         path: Path,
-        data: bytes,
+        data: BinaryIO,
         report: _degraded.Report | None = None,
     ) -> None:
-        """Validate one single-value artifact from already captured bytes.
+        """Validate one single-value artifact from a captured byte stream.
 
-        Archive packaging uses this to validate the exact bytes it will ship,
-        rather than validating a file and then reading it again later.
+        Archive packaging validates the exact snapshot it will ship without
+        loading every raw archive member into memory.
         """
         if self.kind not in _SINGLE_VALUE_KINDS:
-            raise ValueError("buffered reads require a single-value artifact")
+            raise ValueError("stream reads require a single-value artifact")
         report = _degraded.sink(report)
         try:
-            text = data.decode("utf-8")
             if self.kind == JSON:
-                json.loads(text)
+                json.load(codecs.getreader("utf-8")(data))
+            else:
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                while chunk := data.read(1024 * 1024):
+                    decoder.decode(chunk)
+                decoder.decode(b"", final=True)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             self._unreadable(path, exc, report)
+        finally:
+            data.seek(0)
 
     def _note_unreadable(
         self, path: Path, exc: Exception, report: _degraded.Report

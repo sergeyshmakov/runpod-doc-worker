@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from runpod_doc_worker.contract.artifacts import Artifact, ArtifactError
+from runpod_doc_worker.transport import archive_requirements
 from runpod_doc_worker.transport import package
 
 
@@ -123,14 +124,19 @@ def test_archive_transports_reject_a_required_member_that_cannot_be_archived(
 ):
     required = tmp_path / "doc.md"
     required.write_text("# body\n", encoding="utf-8")
-    real_read_bytes = Path.read_bytes
+    real_read_chunk = archive_requirements._read_chunk
+    read_once = False
 
-    def read_bytes(path):
-        if path == required:
+    def read_chunk(source):
+        nonlocal read_once
+        if Path(source.name) == required and read_once:
             raise PermissionError("Permission denied")
-        return real_read_bytes(path)
+        chunk = real_read_chunk(source)
+        if Path(source.name) == required:
+            read_once = True
+        return chunk
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(archive_requirements, "_read_chunk", read_chunk)
     call, upload_called = _package(
         transport, tmp_path, monkeypatch, archive_format
     )
@@ -199,30 +205,30 @@ def test_fatal_unresolvable_required_match_is_logged_once(
 
 
 @pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
-def test_required_member_is_read_once_and_the_same_bytes_are_archived(
+def test_required_member_is_opened_once_and_the_same_bytes_are_archived(
     tmp_path, monkeypatch, archive_format
 ):
     required = tmp_path / "doc.md"
     required.write_bytes(b"# one read\n")
-    real_read_bytes = Path.read_bytes
-    reads = 0
+    real_open = Path.open
+    opens = 0
 
-    def read_bytes(path):
-        nonlocal reads
+    def open_file(path, *args, **kwargs):
+        nonlocal opens
         if path == required:
-            reads += 1
-            if reads > 1:
-                raise PermissionError("required member was read twice")
-        return real_read_bytes(path)
+            opens += 1
+            if opens > 1:
+                raise PermissionError("required member was opened twice")
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "open", open_file)
     call, _ = _package(
         "tarball_b64", tmp_path, monkeypatch, archive_format
     )
 
     raw = base64.b64decode(call()["tarball_b64"])
 
-    assert reads == 1
+    assert opens == 1
     if archive_format == "zip":
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             assert archive.read("doc.md") == b"# one read\n"

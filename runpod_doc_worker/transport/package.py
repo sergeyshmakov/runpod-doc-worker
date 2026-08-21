@@ -26,10 +26,12 @@ from __future__ import annotations
 import base64
 import io
 import os
+import stat
 import tarfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable
 
 from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
@@ -150,20 +152,31 @@ def _build_tarball_bytes(
     with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
         for child in _archive_members(output_dir, report, required_members):
             arcname = child.relative_to(output_dir).as_posix()
-            data = _requirements.read(child, required_members.get(child, ()), report)
-            if data is None:
-                continue
-            try:
-                info = tar.gettarinfo(str(child), arcname=arcname)
-            except OSError as exc:
-                required = required_members.get(child, ())
-                _requirements.unreadable(child, exc, required, report)
-                continue
-            # The file can change between metadata and reading. The bytes in
-            # hand are authoritative for this archive member.
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
+            required = required_members.get(child, ())
+
+            def describe(source: BinaryIO) -> tarfile.TarInfo:
+                info = tar.gettarinfo(fileobj=source, arcname=arcname)
+                if info is None or not info.isreg():
+                    raise IsADirectoryError(f"archive member is not a regular file: {child}")
+                return info
+
+            with _requirements.capture(child, required, report, describe) as snapshot:
+                if snapshot is None:
+                    continue
+                snapshot.metadata.size = snapshot.size
+                tar.addfile(snapshot.metadata, snapshot.data)
     return buf.getvalue()
+
+
+def _zip_info(source: BinaryIO, arcname: str, child: Path) -> zipfile.ZipInfo:
+    """Describe a regular ZIP member from its already-open source."""
+    source_stat = os.fstat(source.fileno())
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise IsADirectoryError(f"archive member is not a regular file: {child}")
+    info = zipfile.ZipInfo(arcname, time.localtime(source_stat.st_mtime)[:6])
+    info.external_attr = (source_stat.st_mode & 0xFFFF) << 16
+    info.file_size = source_stat.st_size
+    return info
 
 
 def _build_zip_bytes(
@@ -187,16 +200,19 @@ def _build_zip_bytes(
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for child in _archive_members(output_dir, report, required_members):
             arcname = child.relative_to(output_dir).as_posix()
-            data = _requirements.read(child, required_members.get(child, ()), report)
-            if data is None:
-                continue
-            try:
-                info = zipfile.ZipInfo.from_file(child, arcname=arcname)
-            except OSError as exc:
-                required = required_members.get(child, ())
-                _requirements.unreadable(child, exc, required, report)
-                continue
-            zf.writestr(info, data, compress_type=zf.compression)
+            required = required_members.get(child, ())
+
+            def describe(source: BinaryIO) -> zipfile.ZipInfo:
+                return _zip_info(source, arcname, child)
+
+            with _requirements.capture(child, required, report, describe) as snapshot:
+                if snapshot is None:
+                    continue
+                snapshot.metadata.file_size = snapshot.size
+                snapshot.metadata.compress_type = zf.compression
+                with zf.open(snapshot.metadata, mode="w") as destination:
+                    while chunk := snapshot.data.read(_requirements._COPY_CHUNK_BYTES):
+                        destination.write(chunk)
     return buf.getvalue()
 
 

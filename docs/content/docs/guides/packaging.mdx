@@ -59,7 +59,7 @@ entry = package_results_entry(
 
 Set `archive_format="zip"` for ZIP. Any other value currently falls back to the default gzip tar container, so validate a caller-supplied format before calling the package.
 
-Archives are assembled in memory. `tarball_b64` also pays base64 response overhead, which makes it a poor fit for large output directories.
+The final archive is assembled in memory. Source members are staged one at a time, and a member larger than 8 MiB spills to temporary disk before it is committed. `tarball_b64` also pays base64 response overhead, which makes it a poor fit for large output directories.
 
 Files that resolve outside the output directory, files the filesystem cannot place, and files whose names are unsafe to extract are skipped rather than archived, and each skip appears in the entry's [degradation report](#degraded-responses). If one of those files satisfied a `required` artifact, packaging raises instead of returning an archive without it. An in-tree symlink is stored as its target bytes rather than as a link.
 

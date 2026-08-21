@@ -9,6 +9,7 @@ rather than emptying it.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import sys
 from pathlib import Path
@@ -476,3 +477,27 @@ def test_the_error_names_what_is_available(output_dir):
 def test_a_subset_of_real_keys_is_still_fine(output_dir):
     out = resolve(MANIFEST, output_dir, "doc", keys=["markdown"])
     assert set(out) == {"markdown"}
+
+
+@pytest.mark.parametrize(
+    "kind,data",
+    [("text", b"# valid text\n"), ("json", b'{"valid": true}')],
+)
+def test_stream_validation_only_requires_python_310_spool_methods(
+    tmp_path, kind, data
+):
+    class Python310Spool:
+        """The 3.10 spool exposes read/seek but no IOBase capability methods."""
+
+        def __init__(self, contents):
+            self.buffer = io.BytesIO(contents)
+
+        def read(self, size=-1):
+            return self.buffer.read(size)
+
+        def seek(self, offset, whence=0):
+            return self.buffer.seek(offset, whence)
+
+    artifact = Artifact("content", ("doc",), kind=kind, required=True)
+
+    artifact.validate_stream(tmp_path / "doc", Python310Spool(data))

@@ -39,7 +39,7 @@ Artifact resolution rejects basenames and file matches that escape the output di
 
 Unsafe archive entries are skipped with warnings so the remaining result can still be returned. Review those warnings because they indicate an engine output layout that should be corrected.
 
-Archives are assembled in memory. Bound the engine's output size before selecting an archive transport.
+The final archive is assembled in memory. Each source member is staged separately; members larger than 8 MiB spill to temporary disk before they are committed to the archive. Bound total engine output and provide enough temporary storage for the largest member before selecting an archive transport.
 
 ## Credentials and S3
 

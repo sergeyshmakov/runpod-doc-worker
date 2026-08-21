@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from runpod_doc_worker.contract.artifacts import Artifact
+from runpod_doc_worker.transport import archive_requirements
 from runpod_doc_worker.transport import package
 
 
@@ -338,14 +339,19 @@ def test_a_dangling_archive_link_outside_is_unresolvable(output_dir):
 def test_an_archive_skips_a_member_that_fails_while_reading(
     output_dir, monkeypatch, archive_format
 ):
-    real_read_bytes = Path.read_bytes
+    real_read_chunk = archive_requirements._read_chunk
+    failed = False
 
-    def read_bytes(path):
-        if path.name == "doc_middle.json":
+    def read_chunk(source):
+        nonlocal failed
+        if Path(source.name).name == "doc_middle.json" and failed:
             raise PermissionError("Permission denied")
-        return real_read_bytes(path)
+        chunk = real_read_chunk(source)
+        if Path(source.name).name == "doc_middle.json":
+            failed = True
+        return chunk
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(archive_requirements, "_read_chunk", read_chunk)
     entry = _entry(
         output_dir, transport="tarball_b64", archive_format=archive_format
     )
