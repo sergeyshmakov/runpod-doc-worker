@@ -135,12 +135,15 @@ def resolve_volume_file(volume_path: str) -> Path:
     if not p.is_absolute():
         raise ValueError(f"volume_path must be an absolute path; got {volume_path!r}")
 
-    resolved = p.resolve()
+    try:
+        resolved = p.resolve()
+    except (OSError, RuntimeError):
+        raise ValueError(f"volume_path cannot be resolved: {volume_path}") from None
     roots = volume_roots()
     for root in roots:
         try:
             r = root.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             continue
         if resolved == r or r in resolved.parents:
             break
