@@ -1014,3 +1014,14 @@ def test_a_multicast_literal_is_refused_end_to_end(monkeypatch):
 def test_a_mapped_multicast_answer_is_also_refused():
     """The mapped form must be judged the same as the address it wraps."""
     assert worker_net._is_routable("::ffff:224.0.0.1") is False
+
+
+def test_the_inline_ceiling_is_reachable_and_is_the_one_enforced():
+    """A worker asserting the refusal has to build a string that exceeds it,
+    and the alternative is copying the arithmetic into a test — where it stops
+    describing this function the first time the headroom changes."""
+    ceiling = worker_io.max_inline_b64_chars()
+    assert ceiling > worker_io.MAX_INLINE_FILE_MB * 1024 * 1024
+
+    with pytest.raises(ValueError, match="inline file too large"):
+        asyncio.run(worker_io.resolve_input_bytes({"file_b64": "A" * (ceiling + 1)}))
