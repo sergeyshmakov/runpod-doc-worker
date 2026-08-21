@@ -10,11 +10,44 @@ The question is always the same and the answer should be too: resolve both
 sides, then compare. Resolving is the point — a symlink, a ``..`` segment or a
 non-canonical spelling all look contained until they are resolved, and every
 instance of this bug in this package has been something that looked contained.
+
+There are three answers, not two. A path that resolves outside the root is the
+engine having laid out its directory in a way a caller must not be served; a
+path that cannot be resolved at all is the filesystem declining to answer — a
+symlink loop, a permission error on a parent directory. Collapsing the second
+into the first is how a permission error comes back reported as an escape,
+which sends whoever reads it hunting a traversal that was never there.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+
+INSIDE = "inside"
+OUTSIDE = "outside"
+UNRESOLVABLE = "unresolvable"
+
+
+def relation(root: Path, candidate: Path) -> str:
+    """Where ``candidate`` sits relative to ``root``: inside, outside, or unknown.
+
+    Returns one of :data:`INSIDE`, :data:`OUTSIDE`, :data:`UNRESOLVABLE`. Ask
+    this rather than :func:`within` when the two failing answers need different
+    handling — reporting the right cause, or treating a file the filesystem
+    will not describe as unusable rather than as an escape attempt.
+    """
+    try:
+        root_resolved = root.resolve()
+        candidate_resolved = candidate.resolve()
+    except (OSError, RuntimeError):
+        return UNRESOLVABLE
+    if (
+        candidate_resolved == root_resolved
+        or root_resolved in candidate_resolved.parents
+    ):
+        return INSIDE
+    return OUTSIDE
 
 
 def within(root: Path, candidate: Path) -> bool:
@@ -24,15 +57,7 @@ def within(root: Path, candidate: Path) -> bool:
     examined is not one to trust: the callers of this either skip such an entry
     or report it, and both are better than assuming it is fine.
     """
-    try:
-        root_resolved = root.resolve()
-        candidate_resolved = candidate.resolve()
-    except (OSError, RuntimeError):
-        return False
-    return (
-        candidate_resolved == root_resolved
-        or root_resolved in candidate_resolved.parents
-    )
+    return relation(root, candidate) == INSIDE
 
 
 def escapes(root: Path, candidate: Path) -> bool:
