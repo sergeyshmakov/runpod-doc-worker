@@ -1,9 +1,10 @@
 """Debug / observability helpers.
 
 Almost everything here is best-effort — operator tooling that should never
-crash the request path. The probe payload is the big one: when a job has
-``probe: true``, the handler returns a filesystem dump of /runpod-volume so
-we can debug RunPod Cached Models setups without shelling into a worker.
+crash the request path. The probe payload is the big one: when an operator has
+explicitly enabled it and a job has ``probe: true``, the handler returns a
+filesystem dump of /runpod-volume so we can debug RunPod Cached Models setups
+without shelling into a worker.
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ from runpod_doc_worker import paths as _paths
 def probe_enabled() -> bool:
     """Whether this worker answers ``probe: true`` jobs.
 
-    On by default — the probe payload is how an operator diagnoses a
-    model-cache problem without shelling into a worker. Operators running an
-    endpoint whose callers have no business seeing its disk layout set
-    ``<PREFIX>_DISABLE_PROBE=1`` and get the normal error envelope instead.
+    Off by default because the payload contains worker-local paths and selected
+    environment values. An operator explicitly enables it with
+    ``<PREFIX>_ENABLE_PROBE=1`` on an endpoint whose handler also restricts who
+    may request diagnostics.
     """
-    return not _config.active().truthy("DISABLE_PROBE")
+    return _config.active().truthy("ENABLE_PROBE")
 
 
 def collect_gpu_info() -> dict[str, Any]:
@@ -349,8 +350,16 @@ def probe_filesystem() -> dict[str, Any]:
     LocalEntryNotFoundError on workers that have Cached Models configured but
     aren't finding the model.
 
-    Safe to call without the engine installed. Read-only. No network.
+    Safe to call without the engine installed. Read-only. No network. Refuses
+    to inspect anything unless the active worker explicitly enables probes.
     """
+    if not probe_enabled():
+        knob = _config.active().env_name("ENABLE_PROBE")
+        raise PermissionError(
+            f"filesystem probe is disabled; set {knob}=1 to enable it for "
+            "operator-authorized diagnostic requests"
+        )
+
     _list = list_directory
 
     hf_home = os.environ.get("HF_HOME", "")

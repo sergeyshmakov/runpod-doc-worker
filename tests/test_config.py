@@ -56,15 +56,22 @@ def test_allow_local_fetch_ignores_another_prefix(configured, monkeypatch):
     assert worker_net.allow_local_targets() is False
 
 
-def test_disable_probe_reads_the_configured_prefix(configured, monkeypatch):
+def test_enable_probe_reads_the_configured_prefix(configured, monkeypatch):
+    assert worker_debug.probe_enabled() is False
+    monkeypatch.setenv(f"{PREFIX}_ENABLE_PROBE", "1")
     assert worker_debug.probe_enabled() is True
-    monkeypatch.setenv(f"{PREFIX}_DISABLE_PROBE", "1")
+
+
+def test_enable_probe_ignores_another_prefix(configured, monkeypatch):
+    monkeypatch.setenv("WORKER_ENABLE_PROBE", "1")
     assert worker_debug.probe_enabled() is False
 
 
-def test_disable_probe_ignores_another_prefix(configured, monkeypatch):
-    monkeypatch.setenv("WORKER_DISABLE_PROBE", "1")
-    assert worker_debug.probe_enabled() is True
+def test_probe_refusal_names_the_configured_prefix(configured, monkeypatch):
+    monkeypatch.delenv(f"{PREFIX}_ENABLE_PROBE", raising=False)
+
+    with pytest.raises(PermissionError, match=f"{PREFIX}_ENABLE_PROBE"):
+        worker_debug.probe_filesystem()
 
 
 @pytest.mark.parametrize("value,expected", [

@@ -52,15 +52,17 @@ from runpod_doc_worker.obs import debug
 diagnostics = {
     "gpu": debug.collect_gpu_info(),
     "model_dir": debug.find_model_dir(),
-    "filesystem": debug.probe_filesystem(),
 }
+
+if debug.probe_enabled() and caller_is_operator:
+    diagnostics["filesystem"] = debug.probe_filesystem()
 ```
 
 `collect_gpu_info()` inspects device 0 when Torch is available. Missing Torch and inspection errors are returned as data.
 
 `find_model_dir()` searches the effective Hugging Face Hub cache using `model_globs`. It reports a recent matching cache directory, not proof of which model weights handled a job.
 
-`probe_filesystem()` performs bounded, read-only, network-free scans. Results can include partial-scan markers when a limit is reached.
+`probe_filesystem()` performs bounded, read-only, network-free scans. It raises `PermissionError` unless `<PREFIX>_ENABLE_PROBE` is truthy. Results can include partial-scan markers when a limit is reached.
 
 <Callout type="warn" title="Keep diagnostics behind an operator boundary">
   Filesystem diagnostics expose cache paths and selected environment values. Do not return them to untrusted callers.
@@ -68,6 +70,6 @@ diagnostics = {
 
 ## Compose probe handling yourself
 
-`probe_enabled()` reads `<PREFIX>_DISABLE_PROBE`, but the package does not inspect `{"probe": true}` or create a probe response. A consumer handler must enforce the setting and decide who may request diagnostics.
+`probe_enabled()` reads `<PREFIX>_ENABLE_PROBE`, which is disabled by default. The package also enforces that switch inside `probe_filesystem()`, but it does not inspect `{"probe": true}`, authenticate callers, or create a probe response. A consumer handler must still decide who may request diagnostics.
 
 Use [worker configuration](/docs/getting-started/configuration/) to select cache patterns and probe fields.

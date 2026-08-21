@@ -19,7 +19,7 @@ once at boot by the worker's entry point:
 
 ``env_prefix`` is why an existing endpoint keeps working after a worker adopts
 this package: the knobs its operators already set (``<PREFIX>_VOLUME_ROOTS``,
-``<PREFIX>_ALLOW_LOCAL_FETCH``, ``<PREFIX>_DISABLE_PROBE``) keep the spellings
+``<PREFIX>_ALLOW_LOCAL_FETCH``, ``<PREFIX>_ENABLE_PROBE``) keep the spellings
 they were documented under, because the prefix comes from the worker rather than
 from here.
 
@@ -75,7 +75,8 @@ class WorkerConfig:
     :param probe_model_ids: ``org/name`` model ids the probe response resolves
         snapshot paths for, to diagnose a cache that is present but unreadable.
     :param probe_env_keys: Extra env var names to include in the probe's env
-        dump, on top of the HuggingFace ones every worker shares.
+        dump, on top of the HuggingFace ones every worker shares. The dump is
+        unavailable unless ``<PREFIX>_ENABLE_PROBE`` is explicitly truthy.
     :param log_mirror: Optional second sink for log records, called as
         ``(level, msg, fields)`` after the stdout line is written. A worker with
         its own telemetry export registers it here; see

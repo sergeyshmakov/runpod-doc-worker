@@ -307,6 +307,7 @@ def test_hf_hub_cache_overrides_hf_home_for_finding_and_probing(tmp_path, monkey
 
     monkeypatch.setenv("HF_HOME", str(tmp_path / "unused-home"))
     monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    monkeypatch.setenv("WORKER_ENABLE_PROBE", "1")
     config.configure(
         config.WorkerConfig(
             model_globs=("models--acme--*",),

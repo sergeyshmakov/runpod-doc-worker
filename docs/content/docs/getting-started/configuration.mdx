@@ -41,14 +41,14 @@ With `env_prefix="ACME"`, the package reads:
 | --- | --- |
 | `ACME_VOLUME_ROOTS` | Comma-separated absolute paths that replace `volume_roots` |
 | `ACME_ALLOW_LOCAL_FETCH` | Allows URL targets that are not publicly routable |
-| `ACME_DISABLE_PROBE` | Disables probe handling when the consumer enforces `probe_enabled()` |
+| `ACME_ENABLE_PROBE` | Enables filesystem diagnostics for an operator-authorized handler |
 
 Truthy values are `1`, `true`, `yes`, and `on`, without case sensitivity.
 
 `LOG_*`, `BUCKET_*`, proxy, and Hugging Face variables do not use `env_prefix`.
 
 <Callout type="warn" title="Probe output contains values">
-  Only add non-secret names to `probe_env_keys`. Filesystem diagnostics return the current values of those variables.
+  Only add non-secret names to `probe_env_keys`. Filesystem diagnostics return the current values of those variables. Keep `ACME_ENABLE_PROBE` unset unless the handler restricts diagnostic requests to operators.
 </Callout>
 
 ## Runtime volume override
