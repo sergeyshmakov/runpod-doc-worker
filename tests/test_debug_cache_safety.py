@@ -11,6 +11,16 @@ from runpod_doc_worker import config
 from runpod_doc_worker.obs import debug
 
 
+class _DirectoryEntry:
+    def __init__(self, path: Path) -> None:
+        self.name = path.name
+        self.path = str(path)
+
+    @staticmethod
+    def is_dir(*, follow_symlinks=True):
+        return True
+
+
 def test_resolve_snapshot_path_reports_a_truncated_fallback_scan(tmp_path, monkeypatch):
     model = tmp_path / "models--acme--parser"
     snapshots = model / "snapshots"
@@ -59,6 +69,64 @@ def test_find_model_dir_does_not_select_a_symlinked_snapshot(tmp_path, monkeypat
     debug.find_model_dir.cache_clear()
     try:
         assert debug.find_model_dir() == str(model)
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_find_model_dir_marks_a_candidate_from_a_truncated_hub_scan(
+    tmp_path, monkeypatch
+):
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    (model / "snapshots" / "abc123").mkdir(parents=True)
+
+    real_scan = debug._scan
+
+    def truncated_hub_scan(directory, max_entries):
+        if directory == hub:
+            return [_DirectoryEntry(model)], True
+        return real_scan(directory, max_entries)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    monkeypatch.setattr(debug, "_scan", truncated_hub_scan)
+    debug.find_model_dir.cache_clear()
+    try:
+        result = debug.find_model_dir()
+        assert str(model) in result
+        assert "truncated" in result
+    finally:
+        debug.find_model_dir.cache_clear()
+        config.reset()
+
+
+def test_find_model_dir_marks_a_candidate_from_a_truncated_snapshot_scan(
+    tmp_path, monkeypatch
+):
+    hub = tmp_path / "hub"
+    model = hub / "models--acme--parser"
+    snapshots = model / "snapshots"
+    snapshot = snapshots / "abc123"
+    snapshot.mkdir(parents=True)
+
+    real_scan = debug._scan
+
+    def truncated_snapshot_scan(directory, max_entries):
+        if directory == snapshots:
+            return [_DirectoryEntry(snapshot)], True
+        return real_scan(directory, max_entries)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    config.configure(config.WorkerConfig(model_globs=("models--acme--*",)))
+    monkeypatch.setattr(debug, "_scan", truncated_snapshot_scan)
+    debug.find_model_dir.cache_clear()
+    try:
+        result = debug.find_model_dir()
+        assert str(snapshot) in result
+        assert "truncated" in result
     finally:
         debug.find_model_dir.cache_clear()
         config.reset()

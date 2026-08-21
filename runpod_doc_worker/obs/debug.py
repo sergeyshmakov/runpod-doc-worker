@@ -69,6 +69,13 @@ def _hub_cache_path() -> Path:
     return home / "hub"
 
 
+def _model_candidate(path: Path, partial_scans: list[str]) -> str:
+    """Describe ``path`` without presenting a bounded search as complete."""
+    if not partial_scans:
+        return str(path)
+    return f"<partial cache scan; candidate={path}; {'; '.join(partial_scans)}>"
+
+
 @functools.lru_cache(maxsize=1)
 def find_model_dir() -> str | None:
     """Locate the model snapshot in the Hub cache so we can prove which weights
@@ -135,6 +142,11 @@ def find_model_dir() -> str | None:
         best = _newest(matches)
         if best is None:
             return None
+        partial_scans: list[str] = []
+        if hub_truncated:
+            partial_scans.append(
+                f"Hub listing truncated after {PROBE_MAX_VISITS} entries"
+            )
         snapshots = best / "snapshots"
         if snapshots.is_dir():
             # Bounded like every other listing in this module, and for a
@@ -149,7 +161,14 @@ def find_model_dir() -> str | None:
             # directory was found, and answering `None` would throw away the
             # part that did work.
             try:
-                entries, _ = _scan(snapshots, PROBE_MAX_ENTRIES)
+                entries, snapshots_truncated = _scan(
+                    snapshots, PROBE_MAX_ENTRIES
+                )
+                if snapshots_truncated:
+                    partial_scans.append(
+                        "snapshot listing truncated after "
+                        f"{PROBE_MAX_ENTRIES} entries"
+                    )
                 # This path is returned as the model actually loaded. Do not
                 # let a directory symlink make a path outside the selected
                 # cache look like one of its snapshots.
@@ -157,10 +176,10 @@ def find_model_dir() -> str | None:
                     Path(e.path) for e in entries if _is_dir_nofollow(e)
                 )
                 if newest is not None:
-                    return str(newest)
+                    return _model_candidate(newest, partial_scans)
             except OSError:
                 pass
-        return str(best)
+        return _model_candidate(best, partial_scans)
     except OSError:
         return None
 
