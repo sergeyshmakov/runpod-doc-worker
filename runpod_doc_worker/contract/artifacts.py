@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from runpod_doc_worker import paths as _paths
-from runpod_doc_worker.obs import logging as _logging
+from runpod_doc_worker.contract import degraded as _degraded
 
 
 TEXT = "text"
@@ -152,20 +152,40 @@ class Artifact:
             return _DERIVED_DEFAULTS[self.kind]()
         return copy.deepcopy(self.default)
 
-    def matches(self, output_dir: Path, basename: str) -> list[Path]:
+    def matches(
+        self,
+        output_dir: Path,
+        basename: str,
+        report: _degraded.Report | None = None,
+    ) -> list[Path]:
         """Files this artifact resolves to, in pattern order then name order."""
         check_basename(basename)
+        report = _degraded.sink(report)
         found: list[Path] = []
         for pattern in self.patterns:
             expanded = pattern.format(basename=_glob.escape(basename))
-            hits = sorted(p for p in output_dir.glob(expanded) if p.is_file())
-            escapees = [p for p in hits if not _paths.within(output_dir, p)]
-            if escapees:
-                raise ValueError(
-                    f"artifact {self.key!r}: pattern {pattern!r} matched "
-                    f"{escapees[0]}, which is outside the output directory. An "
-                    f"engine reads its own output, not whatever sits next to it."
-                )
+            raw = sorted(p for p in output_dir.glob(expanded) if p.is_file())
+            hits: list[Path] = []
+            for p in raw:
+                where = _paths.relation(output_dir, p)
+                if where == _paths.OUTSIDE:
+                    raise ValueError(
+                        f"artifact {self.key!r}: pattern {pattern!r} matched "
+                        f"{p}, which is outside the output directory. An "
+                        f"engine reads its own output, not whatever sits next to it."
+                    )
+                if where == _paths.UNRESOLVABLE:
+                    # Not an escape: the filesystem would not say where this is.
+                    # Unusable either way, so it is dropped like an unreadable
+                    # file rather than failing a job over a traversal that
+                    # nothing has evidence of.
+                    report.note(
+                        reason=_degraded.UNRESOLVABLE,
+                        file=p.name,
+                        artifact=self.key,
+                    )
+                    continue
+                hits.append(p)
             if not hits:
                 continue
             if self.kind in _SINGLE_VALUE_KINDS:
@@ -194,9 +214,15 @@ class Artifact:
                 )
         return found
 
-    def read(self, output_dir: Path, basename: str) -> Any:
+    def read(
+        self,
+        output_dir: Path,
+        basename: str,
+        report: _degraded.Report | None = None,
+    ) -> Any:
         """Value for this artifact, or a fresh default when nothing matched."""
-        hits = self.matches(output_dir, basename)
+        report = _degraded.sink(report)
+        hits = self.matches(output_dir, basename, report)
         if not hits:
             return self.missing_value
 
@@ -204,13 +230,13 @@ class Artifact:
             try:
                 return hits[0].read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError) as e:
-                return self._unreadable(hits[0], e)
+                return self._unreadable(hits[0], e, report)
 
         if self.kind == JSON:
             try:
                 return json.loads(hits[0].read_text(encoding="utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-                return self._unreadable(hits[0], e)
+                return self._unreadable(hits[0], e, report)
 
         # A collection falls back per member rather than wholesale: a file that
         # vanished between matching and reading should cost the response that
@@ -220,29 +246,32 @@ class Artifact:
             try:
                 collected[p.name] = base64.b64encode(p.read_bytes()).decode("ascii")
             except OSError as e:
-                self._log_unreadable(p, e)
+                self._note_unreadable(p, e, report)
         return collected
 
-    def _log_unreadable(self, path: Path, exc: Exception) -> None:
-        """Say that a file could not be read.
+    def _note_unreadable(
+        self, path: Path, exc: Exception, report: _degraded.Report
+    ) -> None:
+        """Record that a file could not be read, and log it.
 
         A truncated or unreadable artifact is the engine's problem to fix, and
         it must not take down a response that is otherwise complete. But a
         response that silently substitutes an empty value is a defect nobody
-        can count, so the substitution is logged: at scale, the log line is the
-        only way this class of failure is visible at all.
+        can count — so the substitution goes into the response as well as the
+        log, because at scale the log line is not what anyone reads.
         """
-        _logging.warning(
-            "artifact unreadable; substituting its default",
-            artifact=self.key,
-            kind=self.kind,
+        report.note(
+            reason=_degraded.UNREADABLE,
             file=path.name,
+            artifact=self.key,
             error_type=type(exc).__name__,
         )
 
-    def _unreadable(self, path: Path, exc: Exception) -> Any:
-        """Log, then fall back to this artifact's default."""
-        self._log_unreadable(path, exc)
+    def _unreadable(
+        self, path: Path, exc: Exception, report: _degraded.Report
+    ) -> Any:
+        """Note, then fall back to this artifact's default."""
+        self._note_unreadable(path, exc, report)
         return self.missing_value
 
 
@@ -269,12 +298,19 @@ def resolve(
     output_dir: Path,
     basename: str,
     keys: Iterable[str] | None = None,
+    report: _degraded.Report | None = None,
 ) -> dict[str, Any]:
     """Read a manifest into a response dict.
 
     ``keys`` filters which artifacts are read at all — a filtered-out artifact
     is omitted from the result, not present-as-empty, so a caller asking for
     markdown only does not pay to base64 every image.
+
+    ``report`` collects anything that had to be dropped or substituted on the
+    way. Pass one when the result is going to a caller: without it the drops
+    are still logged, but the response cannot say a value is a fallback rather
+    than a genuinely empty artifact. See
+    :mod:`runpod_doc_worker.contract.degraded`.
     """
     entries = validate(manifest)
     wanted = set(keys) if keys is not None else None
@@ -292,8 +328,9 @@ def resolve(
                 f"the manifest; it declares "
                 f"{', '.join(art.key for art in entries)}"
             )
+    report = _degraded.sink(report)
     return {
-        art.key: art.read(output_dir, basename)
+        art.key: art.read(output_dir, basename, report)
         for art in entries
         if wanted is None or art.key in wanted
     }
