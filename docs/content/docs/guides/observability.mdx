@@ -54,7 +54,7 @@ diagnostics = {
     "model_dir": debug.find_model_dir(),
 }
 
-if debug.probe_enabled() and caller_is_operator:
+if caller_is_operator:
     diagnostics["filesystem"] = debug.probe_filesystem()
 ```
 
@@ -62,16 +62,48 @@ if debug.probe_enabled() and caller_is_operator:
 
 `find_model_dir()` searches the effective Hugging Face Hub cache using `model_globs`. It reports a recent matching cache directory, not proof of which model weights handled a job.
 
-`probe_filesystem()` performs bounded, read-only, network-free scans. It raises `PermissionError` unless the effective worker policy enables probes. Results can include partial-scan markers when a limit is reached.
+`probe_filesystem()` performs bounded, read-only, network-free scans and answers whenever it is called. Results can include partial-scan markers when a limit is reached.
 
 <Callout type="warn" title="Keep diagnostics behind an operator boundary">
   Filesystem diagnostics expose cache paths and selected environment values. Do not return them to untrusted callers.
 </Callout>
 
-## Compose probe handling yourself
+## Deciding who may ask is yours
 
-`probe_enabled()` first reads a non-blank `<PREFIX>_ENABLE_PROBE`, then the deprecated inverted `<PREFIX>_DISABLE_PROBE` alias, and finally `WorkerConfig.probe_default`. The new name wins when both names are set. The shared default is disabled, but a worker can deliberately preserve an enabled default with `probe_default=True`.
+This package reads no probe environment variable and has no probe policy. `probe_filesystem()` returns the dump to whoever calls it.
 
-The package also enforces the effective policy inside `probe_filesystem()`, but it does not inspect `{"probe": true}`, authenticate callers, or create a probe response. A consumer handler must still decide who may request diagnostics. Direct callers must check `probe_enabled()` or handle `PermissionError`.
+That is deliberate. Whether a caller may see worker-local paths and declared env values depends on who a worker's callers are — a single-tenant endpoint and a shared one want opposite answers, and only the worker knows which it is. While this package guessed, the name and the default of an operator-facing knob moved twice in two releases, under endpoints already deployed with the old spelling.
+
+So the worker owns the gate: it names the variable its operators set, picks the default its deployment wants, and calls this function once it has decided. Nothing here can move that out from under it.
+
+### Migrating from 0.4.x
+
+`probe_enabled()` and `WorkerConfig.probe_default` are gone, and `<PREFIX>_ENABLE_PROBE` and `<PREFIX>_DISABLE_PROBE` are no longer read here. A worker that relied on either — including on `probe_filesystem()` raising `PermissionError` — implements the gate itself, keeping whatever variable name its operators already have:
+
+```python
+import os
+
+_NOT_DISABLED = ("0", "false", "no", "off")
+
+
+def _probe_allowed() -> bool:
+    """Whatever this endpoint's operators already set. The name is yours."""
+    value = os.environ.get("ACME_DISABLE_PROBE", "").strip().lower()
+    if not value:
+        return True                 # unset: this worker's own default
+    # Anything that is not an explicit "not disabled" denies, so an operator
+    # typo leaves the payload unexposed rather than exposed.
+    return value in _NOT_DISABLED
+
+
+if job_input.get("probe") is True:
+    if not _probe_allowed():
+        raise ValueError("probe is disabled on this endpoint")
+    return {"probe": debug.probe_filesystem()}
+```
+
+Two things that predicate is careful about, both inherited from what this package used to do. An unset variable is not the same as a recognised falsey one — only the first should fall through to the worker's own default. And an unrecognised non-blank value denies: `ACME_DISABLE_PROBE=maybe` disabled the probe in 0.4.x, and a migration that turns a typo into an exposed filesystem dump is not one that preserved anything.
+
+Keeping the old variable name is the point: an operator's existing setting keeps meaning what it meant, and it stops being a name a dependency can change.
 
 Use [worker configuration](/docs/getting-started/configuration/) to select cache patterns and probe fields.

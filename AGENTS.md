@@ -45,6 +45,13 @@ breaking too; safer behavior is not automatically a refactor or a patch.
 5. Prefer additive worker-owned policy in `WorkerConfig` when different workers
    reasonably need different defaults. Keep the environment variable as the
    operator override and define its precedence precisely.
+6. When the operator-facing *name* is itself worker-specific, hand the whole
+   knob over rather than only its default. Splitting it — worker picks the
+   default, this package owns the variable and its precedence — leaves an
+   operator-facing name and polarity being chosen by a dependency, and both
+   then move under endpoints already deployed with the old spelling. Filesystem
+   diagnostics went that way twice in two releases before the policy moved out
+   entirely; do not reinstate a probe default here on the strength of rule 5.
 
 Do not silently rename an operator variable, invert an unset default, add an
 exception, or leave a previously meaningful setting inert. When renaming is
