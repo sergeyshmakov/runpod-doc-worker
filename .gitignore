@@ -15,6 +15,13 @@ npm-debug.log
 .npm/
 yarn.lock
 
+# Fumadocs / Next.js generated files.
+docs/.next/
+docs/.source/
+docs/out/
+docs/next-env.d.ts
+docs/*.tsbuildinfo
+
 .mcp.json
 .claude
 .serena

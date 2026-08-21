@@ -1,0 +1,68 @@
+---
+title: Configure a worker
+description: Configure worker-owned environment prefixes, input roots, logging, and model-cache diagnostics.
+---
+
+`WorkerConfig` contains values that the shared package cannot infer from an engine-independent API. Install one configuration during process startup.
+
+```python
+from runpod_doc_worker import WorkerConfig, configure
+from runpod_doc_worker.config import DEFAULT_VOLUME_ROOTS
+
+configure(
+    WorkerConfig(
+        env_prefix="ACME",
+        logger_name="acme-worker",
+        volume_roots=DEFAULT_VOLUME_ROOTS + ("/worker",),
+        model_globs=("models--acme--parser*",),
+        probe_model_ids=("acme/parser-1.0",),
+        probe_env_keys=("ACME_MODEL_SOURCE",),
+    )
+)
+```
+
+## Configuration fields
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `env_prefix` | `"WORKER"` | Prefix for this package's worker-owned environment variables |
+| `logger_name` | `"worker"` | Logger field in JSON output and tag in text output |
+| `volume_roots` | `("/runpod-volume", "/workspace", "/tmp")` | Directories that may contain `volume_path` inputs |
+| `model_globs` | `()` | Hugging Face Hub cache directory patterns used by diagnostics |
+| `probe_model_ids` | `()` | Model IDs whose snapshots diagnostics should resolve |
+| `probe_env_keys` | `()` | Extra environment names and values included in probe output |
+| `log_mirror` | `None` | Optional callback that receives each log record after stdout |
+
+## Prefixed environment variables
+
+With `env_prefix="ACME"`, the package reads:
+
+| Variable | Behavior |
+| --- | --- |
+| `ACME_VOLUME_ROOTS` | Comma-separated absolute paths that replace `volume_roots` |
+| `ACME_ALLOW_LOCAL_FETCH` | Allows URL targets that are not publicly routable |
+| `ACME_DISABLE_PROBE` | Disables probe handling when the consumer enforces `probe_enabled()` |
+
+Truthy values are `1`, `true`, `yes`, and `on`, without case sensitivity.
+
+`LOG_*`, `BUCKET_*`, proxy, and Hugging Face variables do not use `env_prefix`.
+
+<Callout type="warn" title="Probe output contains values">
+  Only add non-secret names to `probe_env_keys`. Filesystem diagnostics return the current values of those variables.
+</Callout>
+
+## Runtime volume override
+
+The environment override replaces the configured tuple. It does not append to it:
+
+```text
+ACME_VOLUME_ROOTS=/runpod-volume,/worker/fixtures
+```
+
+Blank entries are ignored. If the resulting list has no paths, the package uses `volume_roots` from `WorkerConfig`.
+
+## Testing configuration changes
+
+`configure()` changes process-wide state. Tests can call `runpod_doc_worker.config.reset()` to restore defaults. `find_model_dir()` is cached, so tests that change model-cache configuration must also clear that function's cache.
+
+Next, configure [document inputs](/docs/guides/inputs/) and [logging and diagnostics](/docs/guides/observability/).
