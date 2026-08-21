@@ -1,3 +1,26 @@
+## [0.2.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.1.0...v0.2.0) (2026-08-21)
+
+### Features
+
+* **contract:** let a manifest require an artifact ([f849b6b](https://github.com/sergeyshmakov/runpod-doc-worker/commit/f849b6b6447d13f0ed3b7bdb7c138522a96a9813))
+* **contract:** report what a response entry lost ([ed59d6a](https://github.com/sergeyshmakov/runpod-doc-worker/commit/ed59d6a618173e03a672350ce1dec8b0eefd3d6d))
+* **paths:** tell an unresolvable path from an escaping one ([db033fb](https://github.com/sergeyshmakov/runpod-doc-worker/commit/db033fbe952a7387cd55f09d45a824eb9628e8a9))
+
+### Bug Fixes
+
+* **contract:** bind required artifacts to archives ([1cf4bb2](https://github.com/sergeyshmakov/runpod-doc-worker/commit/1cf4bb2afb1bbc91ad522b84e6af14c187ea3045))
+* **contract:** classify a glob hit before discarding non-files ([b3e0b29](https://github.com/sergeyshmakov/runpod-doc-worker/commit/b3e0b29dfac883b5c49d4e8cfc87ffcdb72f86dd))
+* **contract:** classify paths before skipping directories ([d529db2](https://github.com/sergeyshmakov/runpod-doc-worker/commit/d529db2ec81787c43e99607c8b99c5a319a948e7))
+* **contract:** enforce complete archive responses ([f4a96ba](https://github.com/sergeyshmakov/runpod-doc-worker/commit/f4a96bab542050f3cb9220a743c9fd97fe0759be))
+* **contract:** retain broken exact artifact matches ([b9af91d](https://github.com/sergeyshmakov/runpod-doc-worker/commit/b9af91d25039262d316d32a6f4c0ea91a923bce1))
+* **contract:** spool archive member snapshots ([166acf1](https://github.com/sergeyshmakov/runpod-doc-worker/commit/166acf1566180b452021cfa138331bf06d348f53))
+
+### Documentation
+
+* **contract:** clarify missing artifact defaults ([5648ba0](https://github.com/sergeyshmakov/runpod-doc-worker/commit/5648ba041d65affc332b594e11a179ae14420528))
+* describe degraded responses and required artifacts ([a0b5373](https://github.com/sergeyshmakov/runpod-doc-worker/commit/a0b5373d93edbe36fb06913672cc71ef85cf3200))
+* **site:** add Fumadocs GitHub Pages site ([33acc47](https://github.com/sergeyshmakov/runpod-doc-worker/commit/33acc47c7796fa2c02dfec197a3256801586019f))
+
 ## [0.1.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.0.1...v0.1.0) (2026-08-21)
 
 ### Features
