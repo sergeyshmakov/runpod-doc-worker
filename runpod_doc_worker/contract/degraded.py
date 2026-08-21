@@ -54,7 +54,12 @@ VALID_REASONS = (UNREADABLE, UNRESOLVABLE, OUTSIDE_OUTPUT_DIR, UNSAFE_NAME)
 # One message for every drop, with the specifics as fields. A sink can alert on
 # this string alone and catch every present and future drop site, which is the
 # opposite of what three separately-worded messages give you.
-_MESSAGE = "response degraded"
+#
+# Public, and a contract rather than a detail. A worker documents this string to
+# its operators as the thing to alert on, and a log mirror branches on it to
+# count degradations without carrying a literal of its own. Changing it would
+# silence every one of those without failing anything.
+MESSAGE = "response degraded"
 
 # How many items a report will describe. A pathological output directory can
 # produce thousands of drops, and a response is not the place to enumerate them
@@ -110,7 +115,7 @@ class Report:
             item["error_type"] = error_type
         if len(self._items) < MAX_ITEMS:
             self._items.append(item)
-        _logging.warning(_MESSAGE, **item)
+        _logging.warning(MESSAGE, **item)
 
     @property
     def count(self) -> int:
