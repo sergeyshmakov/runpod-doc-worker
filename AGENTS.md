@@ -46,6 +46,13 @@ docstring is not where someone looks before reaching for the obvious name.
 When adding a check with a partial and a complete form, make the complete one the
 obvious name, or say plainly in both docstrings which is which.
 
+**And do not give a new function one of these names.** The client half validates
+URLs too, and its helper is `require_fetchable_url` — raising on refusal,
+returning nothing — precisely so it is not a same-named sibling of
+`net.require_http_url` with a different contract. Two of those, one import apart,
+would have turned a documented trap into an ambient one. Both docstrings say
+which is which; leave the asymmetry in the names.
+
 ## The client half
 
 `runpod_doc_worker.client` is the one subpackage that does not run inside a

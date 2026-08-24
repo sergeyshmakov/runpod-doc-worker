@@ -19,7 +19,7 @@ from runpod_doc_worker.client.responses import (
     decode_b64,
     download,
     extract,
-    require_http_url,
+    require_fetchable_url,
     safe_output_name,
     within,
 )
@@ -30,7 +30,7 @@ __all__ = [
     "decode_b64",
     "download",
     "extract",
-    "require_http_url",
+    "require_fetchable_url",
     "safe_output_name",
     "within",
 ]

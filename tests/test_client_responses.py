@@ -33,7 +33,7 @@ from runpod_doc_worker.client import (
     decode_b64,
     download,
     extract,
-    require_http_url,
+    require_fetchable_url,
     safe_output_name,
     within,
 )
@@ -182,7 +182,7 @@ def test_a_fetch_failure_is_refused(monkeypatch: pytest.MonkeyPatch, raised) -> 
 def test_a_non_http_url_is_refused_before_fetching(url: str) -> None:
     """`urlopen` would happily read `file://`."""
     with pytest.raises(ResponseError, match="expected an http"):
-        require_http_url(url)
+        require_fetchable_url(url)
 
 
 # -----------------------------------------------------------------------------
@@ -466,7 +466,7 @@ def test_a_url_that_is_not_a_string_is_refused(url: object) -> None:
     whose whole job is to report bad input as ResponseError. A parsed response
     honours its annotation only if the worker sent what it promised."""
     with pytest.raises(ResponseError, match="should be a string"):
-        require_http_url(url)  # type: ignore[arg-type]
+        require_fetchable_url(url)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("name", [123, ["a"], {}, 0.5, True])
@@ -616,3 +616,44 @@ def test_the_legacy_tar_fallback_strips_unsafe_modes(
         assert not member.mode & 0o022, f"{member.name} stayed group/other-writable"
         assert (member.uid, member.gid) == (0, 0), "archive-supplied ownership survived"
         assert (member.uname, member.gname) == ("", "")
+
+
+# --- Round eight: the name collision, and destination resolution -------------
+
+
+def test_the_client_url_helper_does_not_share_a_name_with_the_worker_one() -> None:
+    """`transport.net.require_http_url` returns the validated **host**; this
+    module's helper returns nothing and raises on refusal.
+
+    Two functions one import apart with the same name and different contracts is
+    the exact trap AGENTS.md records about the worker-side helper — a consumer
+    writing `url = require_http_url(url)` gets None. Naming the client's the same
+    thing would have doubled it, so it is `require_fetchable_url` and the old name
+    is not exported.
+    """
+    from runpod_doc_worker import client
+    from runpod_doc_worker.transport import net
+
+    assert not hasattr(client, "require_http_url"), "the colliding name is exported"
+    assert "require_fetchable_url" in client.__all__
+    # The contracts really do differ, which is why the names must.
+    assert net.require_http_url("https://example.com/a.tar", field="u") == "example.com"
+    assert require_fetchable_url("https://example.com/a.tar") is None
+
+
+@pytest.mark.parametrize("dest", [12345, None, object()])
+def test_a_destination_that_is_not_a_path_is_refused(dest: object) -> None:
+    """`Path(dest_dir)` raises TypeError before the guarded `mkdir` is reached, so
+    this sat outside the contract even though it happened inside the public
+    call."""
+    with pytest.raises(ResponseError, match="not a usable path"):
+        extract(b"x", dest)  # type: ignore[arg-type]
+
+
+def test_a_destination_with_a_nul_is_refused() -> None:
+    """A NUL survives `Path()` and `resolve()` and is rejected by `mkdir` as
+    `ValueError: embedded null character in path` — not an OSError, so guarding
+    the resolve alone left it escaping. The reproduction caught that; the first
+    version of this fix did not."""
+    with pytest.raises(ResponseError):
+        extract(b"x", "bad\0dir")

@@ -188,8 +188,16 @@ def decode_b64(payload: object, *, what: str) -> bytes:
         raise ResponseError(f"{what} is not valid base64: {e}") from e
 
 
-def require_http_url(url: str) -> None:
+def require_fetchable_url(url: str) -> None:
     """Reject a URL that is not a usable HTTP(S) target, before fetching it.
+
+    Raises on refusal and returns nothing. Deliberately *not* named
+    ``require_http_url``: :func:`runpod_doc_worker.transport.net.require_http_url`
+    has that name and returns the validated **host**, so two functions one import
+    apart would have had the same name and different contracts, and a consumer
+    writing the familiar ``url = require_http_url(url)`` would have replaced the
+    URL with ``None``. That is the trap AGENTS.md already records about the
+    worker-side helper; giving it a same-named sibling would have doubled it.
 
     Worker presigned URLs are always HTTPS. Anything else in that field means the
     result did not come from where the caller thinks it did, and ``urlopen``
@@ -257,7 +265,7 @@ def download(url: str) -> bytes:
     The ordinary case is the expired URL, which is also the one a caller most
     needs to catch.
     """
-    require_http_url(url)
+    require_fetchable_url(url)
     try:
         with urllib.request.urlopen(  # noqa: S310 — scheme checked above
             url, timeout=DOWNLOAD_TIMEOUT_SECONDS
@@ -408,10 +416,20 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
         raise ResponseError(
             f"an archive should be bytes; got {type(data).__name__}"
         )
-    destination = Path(dest_dir).resolve()
+    try:
+        destination = Path(dest_dir).resolve()
+    except (TypeError, ValueError, OSError) as e:
+        # Resolution happens before the guarded creation below, so it was outside
+        # the contract: a NUL in the path raises ValueError, and a non-path
+        # `dest_dir` raises TypeError from `Path()` itself.
+        raise ResponseError(f"the destination is not a usable path: {e}") from e
     try:
         destination.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError, not only OSError: a NUL in the path survives `Path()` and
+        # `resolve()` and is rejected here as
+        # `ValueError: embedded null character in path`. Guarding the resolve
+        # alone left this one escaping, which the reproduction caught.
         # `dest_dir` naming an existing regular file, or a parent that cannot be
         # written, raises before either archive helper runs — so the failure fell
         # outside the contract even though it happened inside the public call.
