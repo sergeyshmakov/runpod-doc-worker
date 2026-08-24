@@ -8,6 +8,11 @@ Subpackages:
   contract   — the artifact manifest a worker declares its outputs with, and
                what a response says when it could not carry all of it
   testing    — checks a worker repo can reuse in its own suite
+  client     — the one subpackage that does not run inside a worker: reading a
+               worker's response safely, for the code that calls one. Standard
+               library only, so a client package can depend on it without
+               pulling this package's transport stack into an end user's
+               environment.
 
 A worker supplies the engine and the entry point; see :mod:`runpod_doc_worker.config`
 for the handful of values it has to declare about itself.

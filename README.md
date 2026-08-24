@@ -71,6 +71,7 @@ because the prefix comes from the worker rather than from here.
 | `contract.artifacts` | the manifest a worker declares its outputs with |
 | `contract.degraded` | what a response says when it could not carry all of them |
 | `testing.hub` | hub.json checks a worker repo runs in its own suite |
+| `client` | reading a worker's response safely, for code that *calls* a worker — archive extraction, output naming, strict base64. Standard library only |
 
 ## Licence
 
