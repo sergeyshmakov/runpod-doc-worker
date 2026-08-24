@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import http.server
 import io
+import os
 import socketserver
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from runpod_doc_worker.client import responses
 from runpod_doc_worker.client.responses import _apply_data_filter_mode
 from runpod_doc_worker.client import (
     ResponseError,
@@ -172,9 +174,17 @@ def test_a_well_formed_zip_extracts(tmp_path: Path) -> None:
 def test_a_fetch_failure_is_refused(monkeypatch: pytest.MonkeyPatch, raised) -> None:
     """An expired presigned URL is the ordinary case here, not an exotic one, and
     a bare TimeoutError arrives unwrapped when the stall is in the body."""
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(raised)
-    )
+    # `_opener`, not `urllib.request.urlopen`: download() stopped using the
+    # module-level function when it gained a redirect-checking opener, and this
+    # patch silently stopped applying. The test then passed on whatever a real
+    # request to example.com did — a network error satisfied the assertion while
+    # exercising none of these exceptions, and a success or a slow response would
+    # have failed or hung the suite instead.
+    class _Exploding:
+        def open(self, *args: object, **kwargs: object):
+            raise raised
+
+    monkeypatch.setattr(responses, "_opener", lambda: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -615,7 +625,10 @@ def test_the_legacy_tar_fallback_strips_unsafe_modes(
     for member in seen:
         assert not member.mode & 0o7000, f"{member.name} kept a setuid/setgid/sticky bit"
         assert not member.mode & 0o022, f"{member.name} stayed group/other-writable"
-        assert (member.uid, member.gid) == (0, 0), "archive-supplied ownership survived"
+        assert (member.uid, member.gid) == (-1, -1), (
+            "archive-supplied ownership survived; -1 is os.chown's "
+            "do-not-change, and 0 would mean root"
+        )
         assert (member.uname, member.gname) == ("", "")
 
 
@@ -677,10 +690,11 @@ def test_a_malformed_redirect_target_is_refused(monkeypatch: pytest.MonkeyPatch)
     next. urllib follows redirects internally, so a `Location` of `http://[bad`
     raises ValueError from inside urlopen without passing through the
     validator."""
-    def exploding_urlopen(*args: object, **kwargs: object):
-        raise ValueError("Invalid IPv6 URL")
+    class _Exploding:
+        def open(self, *args: object, **kwargs: object):
+            raise ValueError("Invalid IPv6 URL")
 
-    monkeypatch.setattr(urllib.request, "urlopen", exploding_urlopen)
+    monkeypatch.setattr(responses, "_opener", lambda: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -1048,7 +1062,11 @@ def test_archive_supplied_ownership_is_discarded() -> None:
     member.uid, member.gid = 1234, 5678
     member.uname, member.gname = "attacker", "attacker"
     _apply_data_filter_mode(member, 0o755)
-    assert (member.uid, member.gid) == (0, 0)
+    # -1, not 0. This asserted 0 for two rounds, which was the bug: 0 means
+    # *root*, so a root client extracting into a setgid or shared destination
+    # replaced the inherited group. The filter uses None for "leave it alone";
+    # -1 is the same intent in a form the legacy tarfile can also pass through.
+    assert (member.uid, member.gid) == (-1, -1)
     assert (member.uname, member.gname) == ("", "")
 
 
@@ -1094,3 +1112,95 @@ def test_an_unusable_timestamp_is_refused(
     with pytest.raises(ResponseError, match="could not be extracted"):
         extract(buffer.getvalue(), tmp_path)
     assert real_utime is not None  # the monkeypatch is scoped to this test
+
+
+# --- Round fifteen: device spellings, the umask race, neutral ownership ------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "NUL .txt",          # Windows ignores trailing spaces when matching
+        "NUL...txt",
+        "NUL.",
+        "COM\u00b9.txt",      # superscript one is COM1
+        "LPT\u00b2.log",
+        "AUX .md",
+        "con .json",
+    ],
+)
+def test_every_device_name_spelling_is_refused(name: str) -> None:
+    """An exact-stem lookup missed two shapes Windows still treats as devices:
+    trailing spaces or dots before the extension, and superscript digits. Both
+    were returned as usable and neither can be saved as an ordinary file."""
+    with pytest.raises(ResponseError, match="reserved device name"):
+        safe_output_name(name, what="a basename")
+
+
+@pytest.mark.parametrize("name", ["CONSOLE.md", "NULL.md", "COMMS.txt", "AUXILIARY.py"])
+def test_names_merely_containing_a_device_name_still_pass(name: str) -> None:
+    """The boundary: normalising the stem must not widen the match."""
+    assert safe_output_name(name, what="a basename") == name
+
+
+def test_reading_the_directory_mode_does_not_touch_the_process_umask(
+    tmp_path: Path,
+) -> None:
+    """The previous version read the umask by setting it to zero and setting it
+    back, which is process-global.
+
+    Another thread creating a file inside that window gets permissions as though
+    no mask were set, and two concurrent extractions can interleave their swaps
+    and leave the process umask permanently changed — two calls to this helper
+    were enough on their own. The mode now comes from the destination, which
+    ``extract`` created moments earlier and which therefore already has the umask
+    applied.
+    """
+    before = os.umask(0o022)
+    os.umask(before)
+
+    mode = responses._directory_mode(tmp_path)
+
+    after = os.umask(0o022)
+    os.umask(after)
+    assert before == after, "the helper mutated the process umask"
+    assert 0 < mode <= 0o777
+
+
+def test_the_directory_mode_falls_back_when_the_destination_is_gone(
+    tmp_path: Path,
+) -> None:
+    """It is called during extraction, so a destination that vanished should give
+    a conservative default rather than raise."""
+    missing = tmp_path / "not-there"
+    assert responses._directory_mode(missing) == 0o755
+
+
+def test_the_module_no_longer_touches_the_umask() -> None:
+    """Structural, because the race is invisible in a single-threaded test: the
+    only safe amount of `os.umask` in this module is none."""
+    source = Path(responses.__file__).read_text(encoding="utf-8")
+    assert "os.umask" not in source
+
+
+def test_ownership_uses_the_do_not_change_sentinel() -> None:
+    """`-1` is os.chown's own "leave it alone". Zero was wrong in a way that only
+    shows for a root client: it means *root*, so extracting into a setgid or
+    shared destination replaced the inherited group and could make the artifacts
+    unreachable for the people meant to read them.
+
+    The filter expresses this as None, and modern TarFile.chown turns None into
+    -1 itself — a guard that arrived with filter support, so passing None would
+    break the legacy interpreters this fallback exists for, exactly as it did for
+    mode. Copying the semantics rather than the literal is the lesson from that.
+    """
+    member = tarfile.TarInfo("f")
+    member.size = 0
+    member.mode = 0o644
+    member.uid, member.gid = 0, 0          # root, as an archive might claim
+    member.uname, member.gname = "root", "root"
+    _apply_data_filter_mode(member, 0o755)
+    assert (member.uid, member.gid) == (-1, -1)
+    assert (member.uname, member.gname) == ("", ""), (
+        "empty names keep chown's name lookup from overriding the numeric values"
+    )

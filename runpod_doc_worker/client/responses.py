@@ -108,7 +108,22 @@ _WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
 _UNSAFE_MODE_BITS = 0o7022  # setuid, setgid, sticky, group- and other-writable
 
 
-def _umask_directory_mode() -> int:
+def _device_stem(name: str) -> str:
+    """The stem Windows compares against its reserved device names.
+
+    Not simply ``name.split(".")[0].upper()``. Windows ignores trailing spaces and
+    dots when matching, so ``"NUL .txt"`` is the ``NUL`` device, and it treats the
+    superscript digits as their ASCII equivalents, so ``"COM\u00b9.txt"`` is
+    ``COM1``. Both passed an exact-stem lookup and neither can be saved as an
+    ordinary file.
+    """
+    stem = name.split(".")[0]
+    for superscript, digit in (("\u00b9", "1"), ("\u00b2", "2"), ("\u00b3", "3")):
+        stem = stem.replace(superscript, digit)
+    return stem.rstrip(" .").upper()
+
+
+def _directory_mode(destination: Path) -> int:
     """``0o777`` minus the process umask — what ``mkdir`` would have produced.
 
     The stdlib ``data`` filter expresses "leave it to the umask" by setting mode
@@ -119,14 +134,23 @@ def _umask_directory_mode() -> int:
     raises ``TypeError``. The fix worked only on interpreters that never run it
     and broke the ones that do.
 
-    A concrete int behaves identically on every version. Read by swapping, which
-    is the only portable way to observe a umask — racy against another thread
-    calling ``umask`` at the same moment, which a client extracting an archive is
-    not doing.
+    Taken from the destination directory rather than from the umask. Reading a
+    umask means setting it and setting it back, and that is process-global: another
+    thread creating a file in the window gets permissions as though the mask were
+    zero, and two concurrent extractions can interleave their swaps and leave the
+    process umask permanently changed. Two calls to this helper were enough on
+    their own — no caller had to be doing anything unusual.
+
+    The destination was created by ``extract`` moments earlier, so its mode is
+    already the umask applied to a new directory. Where it existed first, its
+    permissions are a better model for what goes inside it than the umask is
+    anyway. Falls back to ``0o755`` if it cannot be stat'd, which is the same
+    conservative value the very first version of this used.
     """
-    mask = os.umask(0)
-    os.umask(mask)
-    return 0o777 & ~mask
+    try:
+        return destination.stat().st_mode & 0o777
+    except OSError:
+        return 0o755
 
 
 def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> None:
@@ -144,10 +168,21 @@ def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> Non
     ``0o600``. Masking and then OR-ing owner read/write, as this did, left it
     ``0o601`` — still executable by others, from an untrusted archive.
 
-    One deliberate deviation: the filter sets a directory's mode to ``None`` so
-    creation honours the umask, and the older ``tarfile`` this fallback exists for
-    passes ``None`` straight to ``os.chmod``. Directories get the umask-derived
-    int instead — the same result by a route the legacy code can take.
+    Two deliberate deviations, both for the same reason: the filter expresses
+    "leave this alone" as ``None``, and the older ``tarfile`` this fallback exists
+    for passes ``None`` straight to ``os.chmod`` and ``os.chown``. Modern
+    ``TarFile.chown`` turns ``None`` into ``-1`` itself, and that guard arrived
+    with filter support — so copying the literal breaks the interpreters this code
+    exists for, exactly as it did for ``mode``. Copy the semantics instead:
+
+    * a directory gets a concrete mode derived from the destination;
+    * ownership is set to ``-1``, which is ``os.chown``'s own "do not change" and
+      an int on every version. Zero was wrong: it means *root*, so a root client
+      extracting into a setgid or shared destination replaced the inherited group
+      and could make the artifacts unreachable for the people meant to read them.
+
+    ``uname``/``gname`` stay empty so the name-based lookup in ``chown`` finds
+    nothing and cannot override the numeric values.
     """
     mode = member.mode
     if mode is not None:
@@ -159,7 +194,7 @@ def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> Non
         elif member.isdir() or member.issym():
             mode = directory_mode
         member.mode = mode
-    member.uid, member.gid = 0, 0
+    member.uid, member.gid = -1, -1
     member.uname, member.gname = "", ""
 
 
@@ -259,7 +294,7 @@ def safe_output_name(name: str, *, what: str) -> str:
             f"refusing {what}: {encoded} bytes exceeds the "
             f"{MAX_OUTPUT_NAME_BYTES}-byte filename limit"
         )
-    if name.split(".")[0].upper() in _DOS_DEVICE_NAMES:
+    if _device_stem(name) in _DOS_DEVICE_NAMES:
         raise ResponseError(
             f"refusing {what} {name!r}: reserved device name on Windows"
         )
@@ -529,7 +564,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # archive's own uid/gid, which is what the `data` filter exists
                 # to strip. A crafted response could drop a setuid binary,
                 # especially with a client running as root.
-                directory_mode = _umask_directory_mode()
+                directory_mode = _directory_mode(destination)
                 for member in members:
                     _apply_data_filter_mode(member, directory_mode)
                 tar.extractall(destination, members=members)  # noqa: S202
