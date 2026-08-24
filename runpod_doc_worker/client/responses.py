@@ -15,8 +15,16 @@ validated base64 at all. Shared here, a fix lands once for every consumer,
 including the next one.
 
 Nothing in this module imports the rest of the harness, and nothing outside the
-standard library. It is safe to import from a client package that has no reason
-to pull in httpx or boto3.
+standard library — so importing it costs nothing at runtime beyond what Python has
+already loaded.
+
+That is a claim about imports, not about installation, and an earlier draft of this
+docstring overstated it. Installing this distribution brings httpx and httpcore,
+because the worker side declares them, and pip does that for anyone who depends on
+it including a client that touches none of it. Putting those behind an extra would
+change what every existing worker installs, so the trade is deliberate: the
+alternative is a second distribution, which costs a whole release pipeline to save
+two wheels.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 class ResponseError(RuntimeError):
@@ -75,6 +84,15 @@ def safe_output_name(name: str, *, what: str) -> str:
         raise ResponseError(f"refusing {what} {name!r}: not a usable filename")
     if name != Path(name).name or "/" in name or "\\" in name:
         raise ResponseError(f"refusing {what} {name!r}: expected a plain filename")
+    # A NUL passes every check above — it has no directory component and
+    # `Path(name).name` keeps it — and then every file API rejects it with a
+    # raw `ValueError: embedded null byte`. Control characters are the same
+    # shape of problem: nothing here would stop them and nothing downstream
+    # wants them in a filename.
+    if any(character < " " or character == "\x7f" for character in name):
+        raise ResponseError(
+            f"refusing {what} {name!r}: contains a control character"
+        )
     return name
 
 
@@ -107,14 +125,32 @@ def decode_b64(payload: object, *, what: str) -> bytes:
 
 
 def require_http_url(url: str) -> None:
-    """Reject a non-HTTP(S) archive URL before fetching it.
+    """Reject a URL that is not a usable HTTP(S) target, before fetching it.
 
     Worker presigned URLs are always HTTPS. Anything else in that field means the
     result did not come from where the caller thinks it did, and ``urlopen``
     would happily read ``file://``.
+
+    The scheme prefix alone is not enough. A string can start with ``https://`` and
+    still be malformed in ways that raise from inside the stdlib rather than from
+    here — ``https://[bad`` raises ``ValueError: Invalid IPv6 URL`` while splitting,
+    and ``https://host:bad/x`` raises ``http.client.InvalidURL: nonnumeric port`` at
+    connect time. Both escaped the single-error contract, so the parse happens here
+    where it can be reported as one.
     """
-    if not url.lower().startswith(("http://", "https://")):
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        raise ResponseError(f"refusing to fetch {url!r}: {e}") from e
+    if parts.scheme.lower() not in ("http", "https"):
         raise ResponseError(f"refusing to fetch {url!r}: expected an http(s) URL")
+    try:
+        host = parts.hostname
+        parts.port  # noqa: B018 — property raises on a non-numeric port
+    except ValueError as e:
+        raise ResponseError(f"refusing to fetch {url!r}: {e}") from e
+    if not host:
+        raise ResponseError(f"refusing to fetch {url!r}: no host")
 
 
 def download(url: str) -> bytes:
@@ -178,8 +214,13 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # Older patch releases have no filter parameter; the checks above
                 # already made this safe.
                 tar.extractall(destination)  # noqa: S202
-        except tarfile.TarError as e:
-            # Truncation is only discovered on read for a streamed member.
+        except (tarfile.TarError, OSError) as e:
+            # TarError covers truncation, which is only discovered on read for a
+            # streamed member. OSError covers the destination refusing the write —
+            # a file member landing where a directory already exists raises
+            # IsADirectoryError or PermissionError, which describes a response this
+            # code cannot use rather than a bug in the caller. The zip path below
+            # already caught OSError; this one did not.
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
@@ -199,7 +240,12 @@ def _extract_zip(data: bytes, destination: Path) -> None:
                 )
         try:
             archive.extractall(destination)  # noqa: S202 — names checked above
-        except (zipfile.BadZipFile, OSError) as e:
+        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError) as e:
+            # RuntimeError is what an encrypted member raises, and
+            # NotImplementedError an unsupported compression method. Both describe
+            # an archive this code cannot read rather than a programming error, and
+            # treating an untrusted archive as untrusted means they belong inside
+            # the contract.
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
@@ -212,7 +258,12 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     """
     destination = Path(dest_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    if data[:4] == b"PK\x03\x04":
+    # `is_zipfile` looks for the end-of-central-directory record, so it recognises
+    # every valid layout. The signature check this replaces knew only the
+    # local-file header `PK\x03\x04` — so an empty zip, which begins with the EOCD
+    # signature `PK\x05\x06` and is exactly what packaging an empty directory
+    # produces, was routed to the tar reader and rejected as unreadable.
+    if zipfile.is_zipfile(io.BytesIO(data)):
         _extract_zip(data, destination)
     else:
         _extract_tar(data, destination)

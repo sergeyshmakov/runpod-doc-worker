@@ -203,10 +203,14 @@ def test_within_accepts_the_destination_itself(tmp_path: Path) -> None:
 # The import contract
 # -----------------------------------------------------------------------------
 
-def test_the_client_half_pulls_in_nothing_heavy() -> None:
-    """A client package depends on this to read a response. It must not drag a
-    worker's transport stack into an end user's environment — which is also what
-    lets the distribution keep declaring httpx without that mattering here.
+def test_importing_the_client_half_loads_nothing_heavy() -> None:
+    """Importing this must not load the worker transport stack.
+
+    Scoped to imports deliberately. `pip install` of this distribution *does* bring
+    httpx and httpcore, because the worker side declares them — an earlier version
+    of this test's docstring claimed otherwise, which was not true. What this pins
+    is that a client reading a response pays no import cost for them, which is the
+    part this module controls.
     """
     import subprocess
     import sys
@@ -222,3 +226,89 @@ def test_the_client_half_pulls_in_nothing_heavy() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "", f"client import pulled in {out.stdout.strip()}"
+
+
+# -----------------------------------------------------------------------------
+# Second review round: the boundary was leakier than the first pass thought
+# -----------------------------------------------------------------------------
+#
+# Every case below escaped `ResponseError` when this module was first written. They
+# share a shape worth naming: each is an *ordinary property of an untrusted
+# response* — a malformed URL, an encrypted member, an unwritable destination, a
+# NUL in a name — that the stdlib reports with an exception type the handler did
+# not list. "Treat the response as untrusted" has to include the exceptions it
+# provokes, not only the values it carries.
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[bad",                  # ValueError: Invalid IPv6 URL, while splitting
+        "https://example.com:bad/x",     # http.client.InvalidURL, at connect time
+        "https://",                      # no host at all
+    ],
+)
+def test_a_malformed_url_that_starts_with_a_good_scheme_is_refused(url: str) -> None:
+    """The prefix check accepted these, and the failure surfaced from inside the
+    stdlib instead of from here."""
+    with pytest.raises(ResponseError, match="refusing to fetch"):
+        download(url)
+
+
+def test_a_nul_in_an_output_name_is_refused() -> None:
+    """It has no directory component and `Path(name).name` keeps it, so every check
+    passed — and then the write raised a raw `ValueError: embedded null byte`."""
+    with pytest.raises(ResponseError, match="control character"):
+        safe_output_name("fig\x00.jpg", what="image key")
+
+
+@pytest.mark.parametrize("name", ["fig\n.jpg", "fig\t.jpg", "fig\x7f.jpg"])
+def test_other_control_characters_are_refused_too(name: str) -> None:
+    with pytest.raises(ResponseError, match="control character"):
+        safe_output_name(name, what="image key")
+
+
+def test_a_tar_member_that_cannot_be_written_is_refused(tmp_path: Path) -> None:
+    """A file member landing where a directory already exists raises
+    IsADirectoryError or PermissionError. The zip path caught OSError; the tar path
+    did not, so the same situation leaked or not depending on the container."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("collide")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    (tmp_path / "collide").mkdir()
+
+    with pytest.raises(ResponseError, match="could not be extracted"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_an_empty_zip_is_recognised(tmp_path: Path) -> None:
+    """A valid empty zip begins with the end-of-central-directory signature
+    `PK\x05\x06`, not the local-file header the old check looked for — so it was
+    routed to the tar reader and rejected as unreadable. Packaging an empty
+    directory produces exactly this."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w"):
+        pass
+    assert buffer.getvalue()[:4] == b"PK\x05\x06"
+    assert extract(buffer.getvalue(), tmp_path) == tmp_path.resolve()
+
+
+def test_zip_extraction_failures_that_are_not_bad_zip_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An encrypted member raises RuntimeError and an unsupported compression
+    method NotImplementedError. Neither is a programming error; both describe an
+    archive this code cannot read."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "# hi")
+
+    for raised in (RuntimeError("File doc.md is encrypted"), NotImplementedError()):
+        monkeypatch.setattr(
+            zipfile.ZipFile,
+            "extractall",
+            lambda *a, _e=raised, **k: (_ for _ in ()).throw(_e),
+        )
+        with pytest.raises(ResponseError, match="could not be extracted"):
+            extract(buffer.getvalue(), tmp_path)
