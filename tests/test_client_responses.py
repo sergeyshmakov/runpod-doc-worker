@@ -312,3 +312,57 @@ def test_zip_extraction_failures_that_are_not_bad_zip_file(
         )
         with pytest.raises(ResponseError, match="could not be extracted"):
             extract(buffer.getvalue(), tmp_path)
+
+
+# -----------------------------------------------------------------------------
+# Third review round: the boundary again, plus one wrong answer
+# -----------------------------------------------------------------------------
+
+def test_within_works_with_a_relative_destination() -> None:
+    """The defect here was not a leak but a *wrong answer*: only the target was
+    resolved, so a relative destination compared an absolute path against a
+    relative one and returned False for every safe member. `extract` passes an
+    already-resolved path and so never saw it — a public helper has to be correct
+    on its own terms rather than on its caller's."""
+    assert within(Path("out"), "doc.md") is True
+    assert within(Path("out"), "../escaped") is False
+
+
+def test_a_tar_truncated_after_its_first_header_is_refused(tmp_path: Path) -> None:
+    """`tarfile.open` succeeds and `getmembers()` raises, which is before the
+    extraction handler that was the only one guarding this."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("a.txt")
+        info.size = 4096
+        tar.addfile(info, io.BytesIO(b"x" * 4096))
+
+    with pytest.raises(ResponseError, match="could not be read"):
+        extract(buffer.getvalue()[:1024], tmp_path)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/has space",
+        "https://example.com\n.evil/x",
+        "https://example.com/\ttab",
+    ],
+)
+def test_a_url_with_a_forbidden_character_is_refused(url: str) -> None:
+    """`urlopen` raises `InvalidURL` from inside http.client for these. The newline
+    is the one that matters most: it is how a response would try to smuggle a
+    second request line into the connection."""
+    with pytest.raises(ResponseError, match="space or control character"):
+        download(url)
+
+
+def test_a_destination_that_cannot_be_created_is_refused(tmp_path: Path) -> None:
+    """`dest_dir` naming an existing regular file raises from `mkdir`, before
+    either archive helper runs — outside the contract despite being inside the
+    public call."""
+    blocker = tmp_path / "afile"
+    blocker.write_text("i am a file", encoding="utf-8")
+
+    with pytest.raises(ResponseError, match="destination could not be created"):
+        extract(b"junk", blocker)

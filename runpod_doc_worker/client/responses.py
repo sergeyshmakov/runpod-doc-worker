@@ -66,9 +66,18 @@ _B64_ALPHABET = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 
 
 def within(destination: Path, name: str) -> bool:
-    """Whether archive member ``name`` lands inside ``destination``."""
-    target = (destination / name).resolve()
-    return target == destination or destination in target.parents
+    """Whether archive member ``name`` lands inside ``destination``.
+
+    Both sides are resolved. Only the target used to be, so a *relative*
+    destination — which is the obvious way to call an exported function — compared
+    an absolute path against a relative one and returned False for every safe
+    member. ``extract`` passes an already-resolved path and so never saw it, which
+    is exactly why a public helper has to be correct on its own terms rather than
+    on its caller's.
+    """
+    base = Path(destination).resolve()
+    target = (base / name).resolve()
+    return target == base or base in target.parents
 
 
 def safe_output_name(name: str, *, what: str) -> str:
@@ -138,6 +147,15 @@ def require_http_url(url: str) -> None:
     connect time. Both escaped the single-error contract, so the parse happens here
     where it can be reported as one.
     """
+    # A space or a control character cannot appear in a request target, and
+    # `urlopen` raises `InvalidURL` from inside http.client when one does — past
+    # this function's contract. The newline is the one that matters most: it is how
+    # a response would try to smuggle a second request line into the connection.
+    for character in url:
+        if character <= " " or character == "\x7f":
+            raise ResponseError(
+                f"refusing to fetch {url!r}: contains a space or control character"
+            )
     try:
         parts = urlsplit(url)
     except ValueError as e:
@@ -197,7 +215,13 @@ def _extract_tar(data: bytes, destination: Path) -> None:
         raise ResponseError(f"the archive could not be read: {e}") from e
 
     with tar_file as tar:
-        for member in tar.getmembers():
+        try:
+            members = tar.getmembers()
+        except tarfile.TarError as e:
+            # A tar truncated after a valid first header opens cleanly and fails
+            # here, so the extraction handler below was never reached.
+            raise ResponseError(f"the archive could not be read: {e}") from e
+        for member in members:
             if not (member.isfile() or member.isdir()):
                 raise ResponseError(
                     f"refusing unsafe tar member {member.name!r} "
@@ -257,7 +281,13 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     is what actually arrived.
     """
     destination = Path(dest_dir).resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # `dest_dir` naming an existing regular file, or a parent that cannot be
+        # written, raises before either archive helper runs — so the failure fell
+        # outside the contract even though it happened inside the public call.
+        raise ResponseError(f"the destination could not be created: {e}") from e
     # `is_zipfile` looks for the end-of-central-directory record, so it recognises
     # every valid layout. The signature check this replaces knew only the
     # local-file header `PK\x03\x04` — so an empty zip, which begins with the EOCD
