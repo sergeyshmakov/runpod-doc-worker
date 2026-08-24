@@ -736,10 +736,15 @@ def test_the_legacy_tar_fallback_leaves_usable_modes(
     # A directory's mode is left as None so creation honours the umask, which is
     # what the `data` filter does — this assertion said 0o755 until a review
     # pointed out that hard-coding it overrides the caller's umask.
-    assert by_name["sub"].mode is None, "the directory mode was hard-coded"
+    assert by_name["sub"].mode is not None, "None breaks the legacy tarfile"
+    # Scoped to files. A directory's mode is `0o777 & ~umask`, which under umask 0
+    # is world-writable — and correctly so: that is what `mkdir` produces, and it
+    # is what `filter="data"` leaves behind by skipping the chmod entirely. The
+    # unsafe-bits rule exists to stop the *archive* dictating permissions, not to
+    # override the operator's umask.
     for member in seen:
-        if member.mode is not None:
-            assert not member.mode & 0o7022, "an unsafe bit survived"
+        if not member.isdir():
+            assert not member.mode & 0o7022, "an unsafe bit survived on a file"
 
 
 # --- Round ten: redirect schemes, within(), umask, Windows characters --------
@@ -832,6 +837,16 @@ def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
 
     directories = [m for m in seen if m.isdir()]
     assert directories, "the fallback path did not run"
-    assert all(m.mode is None for m in directories), (
-        "a hard-coded directory mode overrides the caller's umask"
-    )
+    import os as _os
+
+    mask = _os.umask(0)
+    _os.umask(mask)
+    expected = 0o777 & ~mask
+    for member in directories:
+        assert member.mode == expected, "the directory mode ignores the umask"
+        # Not None. This assertion said `is None` for one round, copying what the
+        # `data` filter does — but the `mode is None` guard in TarFile.chmod
+        # arrived together with filter support, so on the older releases this
+        # fallback exists for, None reaches os.chmod and raises TypeError. The
+        # fix worked only where it never runs.
+        assert member.mode is not None, "None is unusable on the legacy tarfile"

@@ -34,6 +34,7 @@ import binascii
 import http.client
 import io
 import lzma
+import os
 import re
 import tarfile
 import urllib.error
@@ -99,6 +100,27 @@ _WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
 # Mode bits the stdlib `data` tar filter clears, replicated for the fallback path
 # on Python patch releases that predate the `filter` parameter.
 _UNSAFE_MODE_BITS = 0o7022  # setuid, setgid, sticky, group- and other-writable
+
+
+def _umask_directory_mode() -> int:
+    """``0o777`` minus the process umask — what ``mkdir`` would have produced.
+
+    The stdlib ``data`` filter expresses "leave it to the umask" by setting mode
+    to ``None`` so tarfile skips the chmod, and this fallback copied that. It was
+    exactly backwards: the ``if tarinfo.mode is None: return`` guard in
+    ``TarFile.chmod`` arrived *together with* filter support, so on the older
+    patch releases this fallback exists for, ``None`` reaches ``os.chmod`` and
+    raises ``TypeError``. The fix worked only on interpreters that never run it
+    and broke the ones that do.
+
+    A concrete int behaves identically on every version. Read by swapping, which
+    is the only portable way to observe a umask — racy against another thread
+    calling ``umask`` at the same moment, which a client extracting an archive is
+    not doing.
+    """
+    mask = os.umask(0)
+    os.umask(mask)
+    return 0o777 & ~mask
 
 
 def within(destination: Path, name: str) -> bool:
@@ -398,7 +420,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     with tar_file as tar:
         try:
             members = tar.getmembers()
-        except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
+        except (tarfile.TarError, OSError, TypeError, *_DECOMPRESSION_ERRORS) as e:
             # A tar truncated after a valid first header opens cleanly and fails
             # here, so the extraction handler below was never reached.
             #
@@ -429,6 +451,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # archive's own uid/gid, which is what the `data` filter exists
                 # to strip. A crafted response could drop a setuid binary,
                 # especially with a client running as root.
+                directory_mode = _umask_directory_mode()
                 for member in members:
                     member.mode &= ~_UNSAFE_MODE_BITS
                     # Clearing the dangerous bits is only half of what the `data`
@@ -439,13 +462,12 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                     # was handed a file it could not open and the job looked like
                     # a success.
                     if member.isdir():
-                        # The filter sets directory mode to None so creation
-                        # honours the process umask. Hard-coding 0o755 made an
-                        # archive directory world-traversable for a client running
-                        # under umask 077, which is the opposite of what that
-                        # operator asked for — a fix that replicated the shape of
-                        # the filter's behaviour and not its point.
-                        member.mode = None  # type: ignore[assignment]
+                        # Honour the umask, the way the filter does — but as an
+                        # int rather than None, which the legacy tarfile this
+                        # branch runs on cannot process. Hard-coding 0o755 here
+                        # made an archive directory world-traversable for a
+                        # client under umask 077.
+                        member.mode = directory_mode
                     else:
                         member.mode |= 0o600
                     member.uid, member.gid = 0, 0
