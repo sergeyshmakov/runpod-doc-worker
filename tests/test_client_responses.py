@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from runpod_doc_worker.client.responses import _apply_data_filter_mode
 from runpod_doc_worker.client import (
     ResponseError,
     decode_b64,
@@ -1008,3 +1009,88 @@ def test_an_unpaired_surrogate_in_an_output_name_is_refused() -> None:
 def test_encodable_names_still_pass(name: str) -> None:
     """Encoding strictly must not reject legitimate non-ASCII names."""
     assert safe_output_name(name, what="a basename") == name
+
+
+# --- Round fourteen: the data filter's real rules, and timestamps ------------
+
+
+@pytest.mark.parametrize(
+    "archived",
+    [0o001, 0o007, 0o100, 0o755, 0o4777, 0o000, 0o644, 0o777, 0o2751],
+)
+def test_the_mode_rules_match_the_stdlib_data_filter(archived: int) -> None:
+    """Compared against the stdlib's own arithmetic rather than against expected
+    constants, because this is the fifth revision of this code and the first four
+    each replicated part of the filter and missed part.
+
+    The conditional this round added is the one missing from all of them: every
+    execute bit is cleared when owner-execute was not set, so `0o001` becomes
+    `0o600`. Masking and then OR-ing owner read/write left it `0o601` — still
+    executable by others, from an untrusted archive.
+    """
+    member = tarfile.TarInfo("f")
+    member.size = 0
+    member.mode = archived
+    member.type = tarfile.REGTYPE
+    _apply_data_filter_mode(member, 0o755)
+
+    expected = archived & 0o755
+    if not expected & 0o100:
+        expected &= ~0o111
+    expected |= 0o600
+    assert member.mode == expected
+
+
+def test_archive_supplied_ownership_is_discarded() -> None:
+    member = tarfile.TarInfo("f")
+    member.size = 0
+    member.mode = 0o644
+    member.uid, member.gid = 1234, 5678
+    member.uname, member.gname = "attacker", "attacker"
+    _apply_data_filter_mode(member, 0o755)
+    assert (member.uid, member.gid) == (0, 0)
+    assert (member.uname, member.gname) == ("", "")
+
+
+def test_a_directory_gets_the_umask_mode_not_the_archived_one() -> None:
+    """The filter sets None; the legacy tarfile this fallback exists for passes
+    None to os.chmod. An int is the same outcome by a route it can take."""
+    member = tarfile.TarInfo("d")
+    member.type = tarfile.DIRTYPE
+    member.mode = 0o000
+    _apply_data_filter_mode(member, 0o750)
+    assert member.mode == 0o750
+
+
+@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
+def test_an_unusable_timestamp_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PAX mtime of nan, or one outside the platform's time_t range, reaches
+    os.utime and raises there. Neither the member checks nor the `data` filter
+    inspects mtime, so this applies to the modern path too.
+
+    Forced rather than reproduced, and worth saying so: an out-of-range mtime is
+    constructible (tarfile writes 1e18 happily) but Windows accepts it at utime,
+    and a nan cannot be written by tarfile at all — `addfile` rejects it while
+    building the PAX header. So this pins that the exception type is handled, not
+    that a given platform raises it.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo("doc.md")
+        info.size = 0
+        info.mtime = 1e18
+        tar.addfile(info, io.BytesIO(b""))
+
+    import os as _os
+
+    real_utime = _os.utime
+
+    def exploding_utime(path, times=None, **kwargs):
+        raise OverflowError("timestamp out of range for platform time_t")
+
+    monkeypatch.setattr(_os, "utime", exploding_utime)
+    with pytest.raises(ResponseError, match="could not be extracted"):
+        extract(buffer.getvalue(), tmp_path)
+    assert real_utime is not None  # the monkeypatch is scoped to this test

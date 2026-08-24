@@ -129,6 +129,40 @@ def _umask_directory_mode() -> int:
     return 0o777 & ~mask
 
 
+def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> None:
+    """Apply the stdlib ``data`` filter's permission rules to ``member``.
+
+    Transcribed from ``tarfile._get_filtered_attrs`` rather than reconstructed
+    from memory, which is the point: this is the fifth revision of this code, and
+    the first four each replicated part of the filter and missed part. In order —
+    extract with full trust; clear the dangerous bits; also grant owner
+    read/write; stop overriding directory modes; and now the conditional that was
+    missing from all of them.
+
+    That conditional is the one worth naming. The filter clears **every** execute
+    bit when owner-execute was not set, so a member archived as ``0o001`` ends up
+    ``0o600``. Masking and then OR-ing owner read/write, as this did, left it
+    ``0o601`` — still executable by others, from an untrusted archive.
+
+    One deliberate deviation: the filter sets a directory's mode to ``None`` so
+    creation honours the umask, and the older ``tarfile`` this fallback exists for
+    passes ``None`` straight to ``os.chmod``. Directories get the umask-derived
+    int instead — the same result by a route the legacy code can take.
+    """
+    mode = member.mode
+    if mode is not None:
+        mode = mode & 0o755
+        if member.isreg() or member.islnk():
+            if not mode & 0o100:
+                mode &= ~0o111
+            mode |= 0o600
+        elif member.isdir() or member.issym():
+            mode = directory_mode
+        member.mode = mode
+    member.uid, member.gid = 0, 0
+    member.uname, member.gname = "", ""
+
+
 def within(destination: Path, name: str) -> bool:
     """Whether archive member ``name`` lands inside ``destination``.
 
@@ -441,7 +475,14 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     """
     try:
         tar_file = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
-    except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
+    except (
+        tarfile.TarError,
+        OSError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        *_DECOMPRESSION_ERRORS,
+    ) as e:
         # A truncated download, or a body that was never a tar. Raised before any
         # of the safety checks below could run, so it used to bypass them and the
         # client's error type together.
@@ -450,7 +491,14 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     with tar_file as tar:
         try:
             members = tar.getmembers()
-        except (tarfile.TarError, OSError, TypeError, *_DECOMPRESSION_ERRORS) as e:
+        except (
+            tarfile.TarError,
+            OSError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            *_DECOMPRESSION_ERRORS,
+        ) as e:
             # A tar truncated after a valid first header opens cleanly and fails
             # here, so the extraction handler below was never reached.
             #
@@ -483,33 +531,29 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # especially with a client running as root.
                 directory_mode = _umask_directory_mode()
                 for member in members:
-                    member.mode &= ~_UNSAFE_MODE_BITS
-                    # Clearing the dangerous bits is only half of what the `data`
-                    # filter does. It also makes the result *usable*: a regular
-                    # file gets owner read/write, and an archived directory mode
-                    # is ignored in favour of something traversable. Without this
-                    # a member stored as mode 000 extracted as 000, so the client
-                    # was handed a file it could not open and the job looked like
-                    # a success.
-                    if member.isdir():
-                        # Honour the umask, the way the filter does — but as an
-                        # int rather than None, which the legacy tarfile this
-                        # branch runs on cannot process. Hard-coding 0o755 here
-                        # made an archive directory world-traversable for a
-                        # client under umask 077.
-                        member.mode = directory_mode
-                    else:
-                        member.mode |= 0o600
-                    member.uid, member.gid = 0, 0
-                    member.uname, member.gname = "", ""
+                    _apply_data_filter_mode(member, directory_mode)
                 tar.extractall(destination, members=members)  # noqa: S202
-        except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
+        except (
+            tarfile.TarError,
+            OSError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            *_DECOMPRESSION_ERRORS,
+        ) as e:
             # TarError covers truncation, which is only discovered on read for a
             # streamed member. OSError covers the destination refusing the write —
             # a file member landing where a directory already exists raises
             # IsADirectoryError or PermissionError, which describes a response this
             # code cannot use rather than a bug in the caller. The zip path below
             # already caught OSError; this one did not.
+            #
+            # ValueError and OverflowError come from the timestamp: a PAX `mtime`
+            # of `nan`, or one outside the platform's time_t range, reaches
+            # `os.utime` and raises there. Neither the checks above nor the `data`
+            # filter inspects mtime, so this covers the modern path as much as the
+            # fallback -- and extraction has written files by then, which is the
+            # more uncomfortable half of it.
             #
             # The decompression errors are here for the case `tarfile.open` cannot
             # see: corruption deep in a compressed stream. The header decompresses,
@@ -559,6 +603,7 @@ def _extract_zip(data: bytes, destination: Path) -> None:
             RuntimeError,
             NotImplementedError,
             ValueError,
+            OverflowError,
             *_DECOMPRESSION_ERRORS,
         ) as e:
             # RuntimeError is what an encrypted member raises, and
