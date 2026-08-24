@@ -41,7 +41,7 @@ import urllib.request
 import zipfile
 import zlib
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 class ResponseError(RuntimeError):
@@ -81,6 +81,18 @@ _B64_ALPHABET = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # `EOFError` from one that ends mid-stream. bzip2 is absent on purpose — it
 # reports through OSError, which is already covered.
 _DECOMPRESSION_ERRORS = (zlib.error, lzma.LZMAError, EOFError)
+
+# Reserved on Windows with any extension, and `open()` on one succeeds while
+# discarding the data.
+_DOS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{digit}" for digit in "123456789"}
+    | {f"LPT{digit}" for digit in "123456789"}
+)
+
+# Mode bits the stdlib `data` tar filter clears, replicated for the fallback path
+# on Python patch releases that predate the `filter` parameter.
+_UNSAFE_MODE_BITS = 0o7022  # setuid, setgid, sticky, group- and other-writable
 
 
 def within(destination: Path, name: str) -> bool:
@@ -128,6 +140,22 @@ def safe_output_name(name: str, *, what: str) -> str:
     if any(character < " " or character == "\x7f" for character in name):
         raise ResponseError(
             f"refusing {what} {name!r}: contains a control character"
+        )
+    # A DOS device name is not a file. On Windows `open("NUL", "wb")` succeeds and
+    # discards everything written to it, so an artifact named `NUL` would be
+    # reported as saved and be gone — the quietest possible data loss. The names
+    # are reserved with any extension (`aux.txt`) and the behaviour does not
+    # depend on this process running on Windows, because the caller writing the
+    # file might be.
+    if name.split(".")[0].upper() in _DOS_DEVICE_NAMES:
+        raise ResponseError(
+            f"refusing {what} {name!r}: reserved device name on Windows"
+        )
+    # Windows silently strips these, so `report.` becomes `report` and two
+    # artifacts one dot apart would collide and overwrite each other.
+    if name[-1] in " .":
+        raise ResponseError(
+            f"refusing {what} {name!r}: trailing dot or space"
         )
     return name
 
@@ -208,6 +236,17 @@ def require_http_url(url: str) -> None:
         raise ResponseError(f"refusing to fetch {url!r}: {e}") from e
     if not host:
         raise ResponseError(f"refusing to fetch {url!r}: no host")
+    # The printable-ASCII check above sees the *encoded* URL, so `http://%FF/`
+    # passes it and passes the host check — and then urllib percent-decodes the
+    # authority, gets U+FFFD, and raises UnicodeEncodeError building the latin-1
+    # Host header. A real IDN host arrives already punycoded (`xn--…`), which is
+    # ASCII, so nothing legitimate decodes to non-ASCII here.
+    try:
+        unquote(host, errors="strict").encode("ascii")
+    except (UnicodeDecodeError, UnicodeEncodeError) as e:
+        raise ResponseError(
+            f"refusing to fetch {url!r}: host is not ASCII once percent-decoded"
+        ) from e
 
 
 def download(url: str) -> bytes:
@@ -290,9 +329,18 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             try:
                 tar.extractall(destination, filter="data")
             except TypeError:
-                # Older patch releases have no filter parameter; the checks above
-                # already made this safe.
-                tar.extractall(destination)  # noqa: S202
+                # Older patch releases have no `filter` parameter. The checks
+                # above reject links, special files and traversal, but they say
+                # nothing about permissions — so an unfiltered extractall here
+                # would honour setuid, setgid and world-writable bits and the
+                # archive's own uid/gid, which is what the `data` filter exists
+                # to strip. A crafted response could drop a setuid binary,
+                # especially with a client running as root.
+                for member in members:
+                    member.mode &= ~_UNSAFE_MODE_BITS
+                    member.uid, member.gid = 0, 0
+                    member.uname, member.gname = "", ""
+                tar.extractall(destination, members=members)  # noqa: S202
         except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
             # TarError covers truncation, which is only discovered on read for a
             # streamed member. OSError covers the destination refusing the write —
@@ -352,6 +400,14 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     response, because the archive format is a *request* parameter and the response
     is what actually arrived.
     """
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        # `io.BytesIO(data)` raises a bare TypeError, and `extract` is exported
+        # directly — a parsed response field honours its annotation only if the
+        # worker sent what it promised, which is the same reason the URL, base64
+        # and output-name helpers all check their own input.
+        raise ResponseError(
+            f"an archive should be bytes; got {type(data).__name__}"
+        )
     destination = Path(dest_dir).resolve()
     try:
         destination.mkdir(parents=True, exist_ok=True)

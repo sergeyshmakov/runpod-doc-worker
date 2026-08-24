@@ -17,6 +17,8 @@ import base64
 import http.server
 import io
 import socketserver
+import subprocess
+import sys
 import tarfile
 import threading
 import urllib.error
@@ -474,3 +476,143 @@ def test_an_output_name_that_is_not_a_string_is_refused(name: object) -> None:
     problem, which is its own small defect."""
     with pytest.raises(ResponseError, match="should be a string"):
         safe_output_name(name, what="a basename")  # type: ignore[arg-type]
+
+
+# --- Round six: the isolation promise, and three more type/platform gaps ------
+
+
+def test_importing_the_client_does_not_load_worker_modules() -> None:
+    """The promise the client subpackage makes, checked as the rule rather than
+    as a symptom.
+
+    The previous test looked for *heavy* modules (httpx and friends) and passed,
+    while `import runpod_doc_worker.client` was in fact loading
+    `runpod_doc_worker.config` every time: Python runs the root package
+    initializer first, and that did `from runpod_doc_worker.config import ...`
+    eagerly. A test that asserts the consequence instead of the invariant goes
+    green the moment the invariant breaks in a way that is merely cheap.
+
+    A subprocess, because `sys.modules` in this one is already polluted by the
+    rest of the suite.
+    """
+    probe = (
+        "import sys, runpod_doc_worker.client; "
+        "print('|'.join(sorted(m for m in sys.modules "
+        "if m.startswith('runpod_doc_worker'))))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+        check=True,
+    )
+    loaded = completed.stdout.strip().split("|")
+    strays = [
+        module
+        for module in loaded
+        if module != "runpod_doc_worker"
+        and not module.startswith("runpod_doc_worker.client")
+    ]
+    assert not strays, f"importing the client pulled in worker modules: {strays}"
+
+
+def test_the_lazy_root_exports_still_work() -> None:
+    """Making the re-exports lazy must not change the worker-side API."""
+    import runpod_doc_worker
+
+    assert runpod_doc_worker.WorkerConfig is not None
+    assert callable(runpod_doc_worker.configure)
+    assert callable(runpod_doc_worker.active)
+    assert "WorkerConfig" in dir(runpod_doc_worker)
+    with pytest.raises(AttributeError):
+        runpod_doc_worker.no_such_name
+
+
+def test_a_percent_encoded_non_ascii_host_is_refused() -> None:
+    """`http://%FF/` passes a printable-ASCII check because the check sees the
+    encoded form. urllib then percent-decodes the authority, gets U+FFFD, and
+    raises UnicodeEncodeError building the latin-1 Host header. A real IDN host
+    arrives punycoded, which is ASCII, so nothing legitimate is refused."""
+    with pytest.raises(ResponseError, match="not ASCII once percent-decoded"):
+        download("http://%FF/")
+
+
+@pytest.mark.parametrize("payload", ["not bytes", 12345, ["a"], {"a": 1}])
+def test_an_archive_that_is_not_bytes_is_refused(payload: object, tmp_path: Path) -> None:
+    """`io.BytesIO(data)` raises a bare TypeError, and `extract` is exported
+    directly."""
+    with pytest.raises(ResponseError, match="should be bytes"):
+        extract(payload, tmp_path)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["NUL", "CON", "AUX", "PRN", "aux.txt", "COM1", "LPT9", "nul.json", "Con.md"],
+)
+def test_a_dos_device_name_is_refused(name: str) -> None:
+    """On Windows `open("NUL", "wb")` succeeds and discards everything written,
+    so an artifact named `NUL` is reported as saved and is gone. Reserved with
+    any extension, and refused regardless of the host platform because the client
+    writing the file may be on Windows even when the worker was not."""
+    with pytest.raises(ResponseError, match="reserved device name"):
+        safe_output_name(name, what="a basename")
+
+
+@pytest.mark.parametrize("name", ["report.", "report ", "a.b.", "x "])
+def test_a_trailing_dot_or_space_is_refused(name: str) -> None:
+    """Windows strips both silently, so two artifacts one dot apart would collide
+    and the second would overwrite the first."""
+    with pytest.raises(ResponseError, match="trailing dot or space"):
+        safe_output_name(name, what="a basename")
+
+
+@pytest.mark.parametrize("name", ["CONSOLE.md", "AUXILIARY.txt", "COM.md", "nullable.py"])
+def test_names_merely_starting_like_a_device_are_allowed(name: str) -> None:
+    """The boundary in the other direction: only the exact stem is reserved, so
+    the check must not swallow ordinary filenames."""
+    assert safe_output_name(name, what="a basename") == name
+
+
+@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
+def test_the_legacy_tar_fallback_strips_unsafe_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On patch releases without `filter`, the fallback used to extract with full
+    trust.
+
+    The member checks reject links, special files and traversal, but say nothing
+    about permissions — so an unfiltered extractall honoured setuid, setgid and
+    world-writable bits and the archive's own uid/gid. A crafted response could
+    drop a setuid binary, especially with a client running as root.
+
+    Forced here by making `filter="data"` raise TypeError the way an old
+    interpreter would, since the one running this suite supports it.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("payload.sh")
+        info.size = 0
+        info.mode = 0o4777
+        info.uid, info.gid = 1234, 5678
+        info.uname, info.gname = "attacker", "attacker"
+        tar.addfile(info, io.BytesIO(b""))
+
+    seen: list[tarfile.TarInfo] = []
+    real_extractall = tarfile.TarFile.extractall
+
+    def fake_extractall(self, path=None, members=None, **kwargs):
+        if "filter" in kwargs:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        seen.extend(members or [])
+        return real_extractall(self, path, members)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+    extract(buffer.getvalue(), tmp_path)
+
+    assert seen, "the fallback path did not run"
+    for member in seen:
+        assert not member.mode & 0o7000, f"{member.name} kept a setuid/setgid/sticky bit"
+        assert not member.mode & 0o022, f"{member.name} stayed group/other-writable"
+        assert (member.uid, member.gid) == (0, 0), "archive-supplied ownership survived"
+        assert (member.uname, member.gname) == ("", "")
