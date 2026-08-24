@@ -91,6 +91,12 @@ _DOS_DEVICE_NAMES = frozenset(
     | {f"LPT{digit}" for digit in "123456789"}
 )
 
+# Filesystems bound a path component in bytes, and 255 is the limit on ext4,
+# APFS and NTFS alike. Checked in bytes rather than characters because the charset
+# permitted here includes non-ASCII: 80 CJK characters already exceed this while
+# passing any character count.
+MAX_OUTPUT_NAME_BYTES = 255
+
 # Characters Windows refuses in a filename. `:` and the separators are already
 # caught by the plain-filename check; these are the rest, and they fail only when
 # the file is created — so a caller trusting this helper's "usable filename"
@@ -142,12 +148,16 @@ def within(destination: Path, name: str) -> bool:
     try:
         base = Path(destination).resolve()
         target = (base / name).resolve()
-    except (TypeError, ValueError, OSError) as e:
+    except (TypeError, ValueError, OSError, RuntimeError) as e:
         # Exported, so a direct caller wraps it in the same `except ResponseError`
         # as everything else here. A NUL in either argument raises ValueError and a
         # non-path destination raises TypeError, both from `Path` rather than from
         # this function — and a member name is untrusted input by definition, which
         # is the whole reason this check exists.
+        #
+        # RuntimeError is the 3.10/3.11 spelling for a symlink loop encountered
+        # while resolving. A destination reused across extractions can contain
+        # one, and this function is exactly the code that walks into it.
         raise ResponseError(f"cannot place {name!r} in {destination!r}: {e}") from e
     return target == base or base in target.parents
 
@@ -194,6 +204,15 @@ def safe_output_name(name: str, *, what: str) -> str:
         raise ResponseError(
             f"refusing {what} {name!r}: contains {''.join(forbidden)!r}, which "
             f"cannot appear in a Windows filename"
+        )
+    encoded = len(name.encode("utf-8", errors="surrogatepass"))
+    if encoded > MAX_OUTPUT_NAME_BYTES:
+        # A caller writing this gets `OSError: [Errno 36] File name too long`,
+        # which is the failure this helper exists to turn into a refusal — it
+        # validates response-provided names *so that* the write is safe.
+        raise ResponseError(
+            f"refusing {what}: {encoded} bytes exceeds the "
+            f"{MAX_OUTPUT_NAME_BYTES}-byte filename limit"
         )
     if name.split(".")[0].upper() in _DOS_DEVICE_NAMES:
         raise ResponseError(
@@ -492,9 +511,15 @@ def _extract_tar(data: bytes, destination: Path) -> None:
 def _extract_zip(data: bytes, destination: Path) -> None:
     try:
         zip_file = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as e:
+    except (zipfile.BadZipFile, UnicodeDecodeError) as e:
         # Reachable for the same reason the tar path is: `extract` chooses the
         # container from the leading bytes of whatever actually arrived.
+        #
+        # UnicodeDecodeError because a central-directory entry may set the UTF-8
+        # flag and then carry bytes that are not UTF-8. `is_zipfile` still says
+        # yes — it only looks for the end-of-central-directory record — so the
+        # constructor is where it surfaces, and it is neither a BadZipFile nor an
+        # OSError.
         raise ResponseError(f"the archive could not be read: {e}") from e
 
     with zip_file as archive:

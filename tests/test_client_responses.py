@@ -850,3 +850,88 @@ def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
         # fallback exists for, None reaches os.chmod and raises TypeError. The
         # fix worked only where it never runs.
         assert member.mode is not None, "None is unusable on the legacy tarfile"
+
+
+# --- Round twelve: zip names, symlink loops, name length ---------------------
+
+
+def test_a_zip_with_invalid_utf8_names_is_refused(tmp_path: Path) -> None:
+    """An entry may set the UTF-8 flag and carry bytes that are not UTF-8.
+
+    `is_zipfile` still says yes — it only looks for the end-of-central-directory
+    record — so `ZipFile()` is where it surfaces, as a UnicodeDecodeError that is
+    neither BadZipFile nor OSError.
+
+    Built by writing a non-ASCII name so zipfile sets the flag itself, then
+    replacing the encoded bytes with invalid ones of the same length, so the flag
+    is genuinely set rather than poked in by hand.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("\u00e9.md", "x")
+
+    raw = bytearray(buffer.getvalue())
+    valid = "\u00e9.md".encode()
+    invalid = b"\xff\xfe.md"
+    assert len(valid) == len(invalid), "the patch must not move any offsets"
+    patched = 0
+    start = 0
+    while True:
+        at = raw.find(valid, start)
+        if at < 0:
+            break
+        raw[at : at + len(valid)] = invalid
+        patched += 1
+        start = at + len(invalid)
+    assert patched, "the name was not found to patch"
+    assert zipfile.is_zipfile(io.BytesIO(bytes(raw))), "the container must still parse"
+
+    with pytest.raises(ResponseError, match="could not be read"):
+        extract(bytes(raw), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("name", "refused"),
+    [
+        ("a" * 256, True),
+        ("a" * 251 + ".jpg", False),
+        ("文" * 90, True),    # 270 bytes from 90 characters, refused
+        ("文" * 80, False),   # 240 bytes, fits and must not be refused
+    ],
+)
+def test_an_overlong_output_name_is_refused(name: str, refused: bool) -> None:
+    """A caller writing this gets `OSError: File name too long`, which is exactly
+    the failure this helper exists to turn into a refusal.
+
+    Measured in bytes rather than characters because the permitted charset
+    includes non-ASCII: 90 CJK characters is 270 bytes and passes any character
+    count, while 80 is 240 and fits.
+    """
+    if refused:
+        with pytest.raises(ResponseError, match="filename limit"):
+            safe_output_name(name, what="a basename")
+    else:
+        assert safe_output_name(name, what="a basename") == name
+
+
+def test_within_normalises_a_resolution_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On 3.10 and 3.11, a symlink loop encountered while resolving raises
+    RuntimeError — not an OSError, so it escaped. A destination reused across
+    extractions can contain one, and this function is the code that walks into
+    it.
+
+    Forced, because the interpreter running this suite returns the path instead
+    of raising.
+    """
+    original = Path.resolve
+
+    def exploding_resolve(self, *args, **kwargs):
+        if "loop" in str(self):
+            raise RuntimeError("Symlink loop from " + str(self))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", exploding_resolve)
+    with pytest.raises(ResponseError, match="cannot place"):
+        within(Path("loop"), "member.md")
