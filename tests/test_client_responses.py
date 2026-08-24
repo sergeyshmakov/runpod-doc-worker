@@ -733,6 +733,105 @@ def test_the_legacy_tar_fallback_leaves_usable_modes(
     assert seen, "the fallback path did not run"
     by_name = {member.name: member for member in seen}
     assert by_name["locked.txt"].mode & 0o600 == 0o600, "the file is unreadable"
-    assert by_name["sub"].mode & 0o500 == 0o500, "the directory is not traversable"
+    # A directory's mode is left as None so creation honours the umask, which is
+    # what the `data` filter does — this assertion said 0o755 until a review
+    # pointed out that hard-coding it overrides the caller's umask.
+    assert by_name["sub"].mode is None, "the directory mode was hard-coded"
     for member in seen:
-        assert not member.mode & 0o7022, "an unsafe bit survived"
+        if member.mode is not None:
+            assert not member.mode & 0o7022, "an unsafe bit survived"
+
+
+# --- Round ten: redirect schemes, within(), umask, Windows characters --------
+
+
+@pytest.mark.parametrize("name", ["report?.txt", "a*.png", "x|y.txt", 'q"t.md', "a<b.md", "a>b.md"])
+def test_a_windows_forbidden_character_is_refused(name: str) -> None:
+    """These cannot be created as files on Windows, and they fail only at write
+    time — so a caller trusting the documented "usable filename" result gets an
+    OSError instead of a refusal."""
+    with pytest.raises(ResponseError, match="Windows filename"):
+        safe_output_name(name, what="a basename")
+
+
+@pytest.mark.parametrize("name", ["fine_name.md", "a-b.c.jpg", "p0001_fig_0.jpg"])
+def test_ordinary_names_still_pass(name: str) -> None:
+    assert safe_output_name(name, what="a basename") == name
+
+
+def test_within_refuses_a_nul_in_the_member_name() -> None:
+    """Whether `resolve()` raises on a NUL depends on the platform — POSIX
+    rejects it, Windows computes a path and answered True — so the same archive
+    got two different answers from an exported helper. Checked explicitly for a
+    consistent one."""
+    with pytest.raises(ResponseError, match="NUL"):
+        within(Path("out"), "bad\0name")
+
+
+def test_within_refuses_a_destination_that_is_not_a_path() -> None:
+    """Exported, so a direct caller wraps it in the same `except ResponseError`
+    as everything else here; `Path(None)` raised a bare TypeError."""
+    with pytest.raises(ResponseError):
+        within(None, "x")  # type: ignore[arg-type]
+
+
+def test_a_redirect_to_another_scheme_is_refused() -> None:
+    """urllib's default opener has an FTP handler installed and its redirect
+    handler follows a `Location` wherever it points, so an accepted HTTPS
+    endpoint redirecting to `ftp://` was fetched over FTP — past a validator
+    whose documented job is to reject exactly that.
+
+    Asserted against the redirect handler directly rather than by standing up a
+    redirecting server, because the check belongs to the handler and this keeps
+    the test off the network.
+    """
+    from runpod_doc_worker.client.responses import _CheckedRedirectHandler
+
+    handler = _CheckedRedirectHandler()
+    with pytest.raises(ResponseError, match="expected an http"):
+        handler.redirect_request(None, None, 302, "Found", {}, "ftp://example.com/x")
+
+
+def test_the_opener_offers_only_http_handlers() -> None:
+    """The opener is built explicitly instead of using the module default, whose
+    handler set includes FTP and local file access — capabilities this function
+    has no use for and cannot safely offer an untrusted URL."""
+    from runpod_doc_worker.client.responses import _opener
+
+    names = {type(h).__name__ for h in _opener().handlers}
+    assert "FTPHandler" not in names
+    assert "FileHandler" not in names
+
+
+@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
+def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `data` filter sets directory mode to None so creation honours the
+    process umask. Hard-coding 0o755 made an archive directory world-traversable
+    for a client running under umask 077 — replicating the shape of the filter's
+    behaviour and not its point."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        folder = tarfile.TarInfo("sub")
+        folder.type = tarfile.DIRTYPE
+        folder.mode = 0o777
+        tar.addfile(folder)
+
+    seen: list[tarfile.TarInfo] = []
+    real_extractall = tarfile.TarFile.extractall
+
+    def fake_extractall(self, path=None, members=None, **kwargs):
+        if "filter" in kwargs:
+            raise TypeError("no filter on this release")
+        seen.extend(members or [])
+        return real_extractall(self, path, members)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+    extract(buffer.getvalue(), tmp_path)
+
+    directories = [m for m in seen if m.isdir()]
+    assert directories, "the fallback path did not run"
+    assert all(m.mode is None for m in directories), (
+        "a hard-coded directory mode overrides the caller's umask"
+    )

@@ -90,6 +90,12 @@ _DOS_DEVICE_NAMES = frozenset(
     | {f"LPT{digit}" for digit in "123456789"}
 )
 
+# Characters Windows refuses in a filename. `:` and the separators are already
+# caught by the plain-filename check; these are the rest, and they fail only when
+# the file is created — so a caller trusting this helper's "usable filename"
+# result gets an OSError at write time instead of a refusal here.
+_WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
+
 # Mode bits the stdlib `data` tar filter clears, replicated for the fallback path
 # on Python patch releases that predate the `filter` parameter.
 _UNSAFE_MODE_BITS = 0o7022  # setuid, setgid, sticky, group- and other-writable
@@ -105,8 +111,22 @@ def within(destination: Path, name: str) -> bool:
     is exactly why a public helper has to be correct on its own terms rather than
     on its caller's.
     """
-    base = Path(destination).resolve()
-    target = (base / name).resolve()
+    if isinstance(name, str) and "\x00" in name:
+        # Checked explicitly because whether `resolve()` raises on a NUL depends
+        # on the platform: POSIX rejects it, Windows computes a path and returns
+        # True, so the same archive got two different answers. No valid member
+        # name contains one, and a member name is untrusted by definition.
+        raise ResponseError(f"refusing member {name!r}: contains a NUL")
+    try:
+        base = Path(destination).resolve()
+        target = (base / name).resolve()
+    except (TypeError, ValueError, OSError) as e:
+        # Exported, so a direct caller wraps it in the same `except ResponseError`
+        # as everything else here. A NUL in either argument raises ValueError and a
+        # non-path destination raises TypeError, both from `Path` rather than from
+        # this function — and a member name is untrusted input by definition, which
+        # is the whole reason this check exists.
+        raise ResponseError(f"cannot place {name!r} in {destination!r}: {e}") from e
     return target == base or base in target.parents
 
 
@@ -147,6 +167,12 @@ def safe_output_name(name: str, *, what: str) -> str:
     # are reserved with any extension (`aux.txt`) and the behaviour does not
     # depend on this process running on Windows, because the caller writing the
     # file might be.
+    forbidden = sorted(_WINDOWS_FORBIDDEN.intersection(name))
+    if forbidden:
+        raise ResponseError(
+            f"refusing {what} {name!r}: contains {''.join(forbidden)!r}, which "
+            f"cannot appear in a Windows filename"
+        )
     if name.split(".")[0].upper() in _DOS_DEVICE_NAMES:
         raise ResponseError(
             f"refusing {what} {name!r}: reserved device name on Windows"
@@ -263,6 +289,50 @@ def require_fetchable_url(url: str) -> None:
         ) from e
 
 
+class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Applies :func:`require_fetchable_url` to every hop.
+
+    urllib's default handler follows a ``Location`` wherever it points, and its
+    opener has an FTP handler installed — so an accepted HTTPS endpoint
+    redirecting to ``ftp://`` was fetched over FTP, past a validator whose whole
+    documented job is to reject exactly that. Validating the URL a caller hands
+    in says nothing about the ones the *server* chooses, and a redirect target is
+    as untrusted as a response body.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        require_fetchable_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """An opener that speaks only HTTP(S) and checks every redirect.
+
+    Assembled from an empty ``OpenerDirector`` rather than with
+    ``build_opener``, which *adds to* the default handler set rather than
+    replacing it — so passing the HTTP handlers still left ``FTPHandler`` and
+    ``FileHandler`` installed, which is what a first attempt at this did. The
+    redirect check above already refuses a non-HTTP hop; removing the handlers
+    means a miss there has nothing to reach.
+
+    ``ProxyHandler`` is kept deliberately: an operator behind a proxy expects
+    ``HTTPS_PROXY`` to be honoured, and dropping it would silently change how
+    every fetch is routed.
+    """
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.UnknownHandler(),
+        _CheckedRedirectHandler(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
 def download(url: str) -> bytes:
     """Fetch an archive. Network failures arrive as :class:`ResponseError`.
 
@@ -273,7 +343,7 @@ def download(url: str) -> bytes:
     """
     require_fetchable_url(url)
     try:
-        with urllib.request.urlopen(  # noqa: S310 — scheme checked above
+        with _opener().open(  # noqa: S310 — scheme checked, redirects checked
             url, timeout=DOWNLOAD_TIMEOUT_SECONDS
         ) as response:
             return response.read()
@@ -369,7 +439,13 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                     # was handed a file it could not open and the job looked like
                     # a success.
                     if member.isdir():
-                        member.mode = 0o755
+                        # The filter sets directory mode to None so creation
+                        # honours the process umask. Hard-coding 0o755 made an
+                        # archive directory world-traversable for a client running
+                        # under umask 077, which is the opposite of what that
+                        # operator asked for — a fix that replicated the shape of
+                        # the filter's behaviour and not its point.
+                        member.mode = None  # type: ignore[assignment]
                     else:
                         member.mode |= 0o600
                     member.uid, member.gid = 0, 0
