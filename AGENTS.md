@@ -76,11 +76,12 @@ gate. An agent that adds one has decided the version number and shipped it. That
 matters more here than in a consumer repo, because a major version of this
 package is a migration imposed on every worker built on it.
 
-That happened in a consumer. `mineru-runpod` took a per-job SSRF hardening as
+That happened in a consumer repo. A per-job SSRF hardening was committed as
 `fix(schema)!:` because it did reverse documented and tested behaviour — a
-defensible thing to *propose*. Merged, it released **2.0.0** for four bug fixes
-and one hardening change, and reversing it meant deleting a published Release and
-tag and force-pushing `main`.
+defensible thing to *propose*. It reached the release branch and published a
+**major version** for four bug fixes and one hardening change, and reversing it
+meant deleting a published Release and tag and force-pushing the branch. The
+opt-in flag that would have made it a patch already existed.
 
 So when a change might break a consumer — a renamed or removed export, a default
 that flips, a helper that starts rejecting input it used to accept — **stop and
