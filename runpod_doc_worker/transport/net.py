@@ -55,11 +55,23 @@ def _allow_local_hint() -> str:
 
 
 def require_http_url(url: str, *, field: str) -> str:
-    """Return the host of ``url``, or raise if it isn't a usable HTTP target.
+    """Return the **host** of ``url``, or raise if it isn't a usable HTTP target.
 
     Checked here rather than left to the HTTP client so the error names the
     input field the caller got wrong instead of surfacing a protocol-level
     complaint from a library they didn't call.
+
+    Two things worth being explicit about, because both have cost a consumer a
+    real bug:
+
+    * This is a **shape check only** — scheme, host, and address spelling. It says
+      nothing about where the host resolves to. For any URL a *caller* supplied,
+      use :func:`check_target`, which does this check and the address policy in
+      one call. Using this function alone leaves a request that can be aimed at
+      loopback, link-local, or a cloud metadata endpoint.
+    * It returns the host, **not** the URL. It reads like a validator that passes
+      its input through, and it does not; assigning its result back over the URL
+      silently replaces the whole URL with a bare hostname.
     """
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -176,9 +188,20 @@ def resolve_checked(url: str, *, field: str) -> list[str]:
 
 
 def check_target(url: str, *, field: str) -> None:
-    """Check the shape of ``url`` and where it resolves to, discarding the
-    address. Equivalent to :func:`resolve_checked` for callers that only want
-    the verdict."""
+    """The complete check for a caller-supplied URL. Raises, or returns None.
+
+    Shape *and* address policy: it delegates to :func:`resolve_checked`, which
+    calls :func:`require_http_url` itself and then rejects any host that resolves
+    somewhere non-routable unless the operator opted in. So this one call is
+    everything — there is no second step to remember.
+
+    Reach for this whenever a URL came from a job payload. ``file_url`` gets the
+    policy for free, because :class:`CheckedTargetTransport` applies it at connect
+    time; a URL the worker hands to an engine or a third-party client instead is
+    the case that needs calling this explicitly, and two consumers of this package
+    independently shipped an SSRF by using :func:`require_http_url` alone for
+    exactly that.
+    """
     resolve_checked(url, field=field)
 
 

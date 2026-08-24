@@ -28,6 +28,42 @@ Changing a default, renaming a variable, or making a function raise where it
 previously returned is a compatibility change. Security hardening can be
 breaking too; safer behavior is not automatically a refactor or a patch.
 
+## Two APIs that have each cost a consumer a bug
+
+Both are documented in `transport/net.py`, and both are listed here because the
+docstring is not where someone looks before reaching for the obvious name.
+
+- **For any URL that came from a job payload, call `net.check_target`.** It is the
+  complete check: shape *and* address policy, in one call. `require_http_url` is
+  the shape half alone, and two consumers independently shipped an SSRF by using
+  it by itself on a URL they then handed to an engine. `file_url` is the exception
+  — `CheckedTargetTransport` applies the policy at connect time, so a worker that
+  only fetches through the harness inherits it.
+- **`require_http_url` returns the host, not the URL.** It reads like a validator
+  that passes its input through. Assigning its result back over the URL replaces
+  the whole URL with a bare hostname, which a consumer did.
+
+When adding a check with a partial and a complete form, make the complete one the
+obvious name, or say plainly in both docstrings which is which.
+
+## The client half
+
+`runpod_doc_worker.client` is the one subpackage that does not run inside a
+worker: it is for code that talks *to* one. It exists because consumers each
+carried their own copy of archive extraction, output naming, and payload decoding,
+and the copies drifted — a fix in one never reached the identical sites in
+another.
+
+Two constraints on it:
+
+- **Standard library only, and no imports from the rest of this package.** A
+  client package depends on it to read a response; it must not pull a worker's
+  transport stack into an end user's environment. A test asserts that importing it
+  loads no httpx, httpcore, boto3, or anyio.
+- **One error type.** Everything raises `ResponseError`, so a consumer wraps these
+  calls in a single `except` and nothing arrives at user code as a raw stdlib
+  exception. A new function that can fail belongs in that contract too.
+
 ## Before changing a public contract
 
 1. State the old behavior, proposed behavior, affected consumers, and why the
