@@ -205,7 +205,18 @@ def safe_output_name(name: str, *, what: str) -> str:
             f"refusing {what} {name!r}: contains {''.join(forbidden)!r}, which "
             f"cannot appear in a Windows filename"
         )
-    encoded = len(name.encode("utf-8", errors="surrogatepass"))
+    try:
+        encoded = len(name.encode("utf-8"))
+    except UnicodeEncodeError as e:
+        # An unpaired surrogate survives JSON decoding, so a response can carry
+        # a name containing one. This measured length with errors="surrogatepass"
+        # so the check itself could not crash -- which silently admitted a name
+        # that raises UnicodeEncodeError the moment the caller writes it on a
+        # UTF-8 filesystem. Encoding strictly makes measuring and accepting the
+        # same question, which is what it should have been.
+        raise ResponseError(
+            f"refusing {what} {name!r}: not encodable as UTF-8 ({e.reason})"
+        ) from e
     if encoded > MAX_OUTPUT_NAME_BYTES:
         # A caller writing this gets `OSError: [Errno 36] File name too long`,
         # which is the failure this helper exists to turn into a refusal — it
@@ -511,7 +522,13 @@ def _extract_tar(data: bytes, destination: Path) -> None:
 def _extract_zip(data: bytes, destination: Path) -> None:
     try:
         zip_file = zipfile.ZipFile(io.BytesIO(data))
-    except (zipfile.BadZipFile, UnicodeDecodeError) as e:
+    except (
+        zipfile.BadZipFile,
+        UnicodeDecodeError,
+        NotImplementedError,
+        ValueError,
+        OSError,
+    ) as e:
         # Reachable for the same reason the tar path is: `extract` chooses the
         # container from the leading bytes of whatever actually arrived.
         #
@@ -520,6 +537,12 @@ def _extract_zip(data: bytes, destination: Path) -> None:
         # yes — it only looks for the end-of-central-directory record — so the
         # constructor is where it surfaces, and it is neither a BadZipFile nor an
         # OSError.
+        #
+        # NotImplementedError comes from an unsupported `extract_version`, and
+        # ValueError from a central-directory offset that seeks negative. The
+        # pattern across all four: `is_zipfile` looks only for the
+        # end-of-central-directory record, so every field *inside* the container
+        # is still untrusted and the constructor is where each is first read.
         raise ResponseError(f"the archive could not be read: {e}") from e
 
     with zip_file as archive:
@@ -535,6 +558,7 @@ def _extract_zip(data: bytes, destination: Path) -> None:
             OSError,
             RuntimeError,
             NotImplementedError,
+            ValueError,
             *_DECOMPRESSION_ERRORS,
         ) as e:
             # RuntimeError is what an encrypted member raises, and
@@ -542,6 +566,11 @@ def _extract_zip(data: bytes, destination: Path) -> None:
             # an archive this code cannot read rather than a programming error, and
             # treating an untrusted archive as untrusted means they belong inside
             # the contract.
+            #
+            # ValueError is what a corrupted local-header offset produces: opening
+            # a member seeks to it, and a negative result raises
+            # `ValueError: negative seek value` rather than BadZipFile. The central
+            # directory parsed, so nothing earlier had reason to object.
             #
             # The decompression errors cover the case the header cannot reveal: a
             # zip whose central directory is intact — so `is_zipfile` says yes and
@@ -598,7 +627,20 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     # local-file header `PK\x03\x04` — so an empty zip, which begins with the EOCD
     # signature `PK\x05\x06` and is exactly what packaging an empty directory
     # produces, was routed to the tar reader and rejected as unreadable.
-    if zipfile.is_zipfile(io.BytesIO(data)):
+    # Guarded because the *detection* can fail too: `is_zipfile` catches only
+    # OSError internally, so a ValueError from a bad seek while reading the
+    # end-of-central-directory record would propagate from here, ahead of either
+    # helper and outside their handlers.
+    #
+    # Precautionary rather than reproduced — worth saying, because I first added
+    # this believing it was where the corrupted-offset ValueError came from. It is
+    # not: that one surfaces from `extractall` opening a member, and the fix for it
+    # is in `_extract_zip`. Tracing beat guessing, and the guess looked right.
+    try:
+        looks_like_zip = zipfile.is_zipfile(io.BytesIO(data))
+    except (ValueError, OSError, zipfile.BadZipFile) as e:
+        raise ResponseError(f"the archive could not be read: {e}") from e
+    if looks_like_zip:
         _extract_zip(data, destination)
     else:
         _extract_tar(data, destination)

@@ -935,3 +935,76 @@ def test_within_normalises_a_resolution_runtime_error(
     monkeypatch.setattr(Path, "resolve", exploding_resolve)
     with pytest.raises(ResponseError, match="cannot place"):
         within(Path("loop"), "member.md")
+
+
+# --- Round thirteen: more zip constructor failures, surrogates ---------------
+
+
+def _zip_with(mutate) -> bytes:
+    """A minimal valid zip, then `mutate(bytearray)` applied to it."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "x")
+    raw = bytearray(buffer.getvalue())
+    mutate(raw)
+    return bytes(raw)
+
+
+def _break_extract_version(raw: bytearray) -> None:
+    raw[raw.find(b"PK\x01\x02") + 6] = 255
+
+
+def _break_eocd_offset(raw: bytearray) -> None:
+    at = raw.find(b"PK\x05\x06")
+    raw[at + 16 : at + 20] = b"\xff\xff\xff\xff"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "label"),
+    [
+        (_break_extract_version, "unsupported extract_version"),
+        (_break_eocd_offset, "central-directory offset that seeks negative"),
+    ],
+)
+def test_a_structurally_broken_zip_is_refused(mutate, label: str, tmp_path: Path) -> None:
+    """`is_zipfile` looks only for the end-of-central-directory record, so every
+    field *inside* the container is still untrusted — an unsupported version
+    raises NotImplementedError and a bad offset raises ValueError, neither of them
+    a BadZipFile.
+
+    The offset case surfaces from `extractall` opening a member, not from the
+    constructor. I first guarded the wrong call believing otherwise; the traceback
+    settled it, and the guess had looked right.
+    """
+    data = _zip_with(mutate)
+    assert zipfile.is_zipfile(io.BytesIO(data)), f"{label}: container must still parse"
+    with pytest.raises(ResponseError):
+        extract(data, tmp_path)
+
+
+def test_a_well_formed_zip_still_extracts_after_the_widened_guards(tmp_path: Path) -> None:
+    """ValueError and OSError are broad, so this pins that the happy path is
+    unaffected by adding them."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "# hello")
+    where = extract(buffer.getvalue(), tmp_path)
+    assert (where / "doc.md").read_text(encoding="utf-8") == "# hello"
+
+
+def test_an_unpaired_surrogate_in_an_output_name_is_refused() -> None:
+    """An unpaired surrogate survives JSON decoding, so a response can carry one.
+
+    The length check measured with errors="surrogatepass" so it could not crash,
+    which silently admitted a name that raises UnicodeEncodeError the moment the
+    caller writes it. That was a hole created by the previous round's fix.
+    """
+    name = "x" + chr(0xD800) + ".txt"
+    with pytest.raises(ResponseError, match="not encodable as UTF-8"):
+        safe_output_name(name, what="a basename")
+
+
+@pytest.mark.parametrize("name", ["ordinary.md", "\u6587\u66f8.md", "a-b_c.jpg"])
+def test_encodable_names_still_pass(name: str) -> None:
+    """Encoding strictly must not reject legitimate non-ASCII names."""
+    assert safe_output_name(name, what="a basename") == name
