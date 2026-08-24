@@ -64,6 +64,42 @@ Two constraints on it:
   calls in a single `except` and nothing arrives at user code as a raw stdlib
   exception. A new function that can fail belongs in that contract too.
 
+## Never mark a change breaking on your own
+
+**Do not put `!` in a commit title, and do not write a `BREAKING CHANGE:` footer,
+without explicit approval from the maintainer.** Ask first, in plain words, and
+let them decide.
+
+This repo runs semantic-release on `main`. A `!` is not a note for readers — it
+is an instruction to cut a **major version** and publish it, with no further
+gate. An agent that adds one has decided the version number and shipped it. That
+matters more here than in a consumer repo, because a major version of this
+package is a migration imposed on every worker built on it.
+
+That happened in a consumer. `mineru-runpod` took a per-job SSRF hardening as
+`fix(schema)!:` because it did reverse documented and tested behaviour — a
+defensible thing to *propose*. Merged, it released **2.0.0** for four bug fixes
+and one hardening change, and reversing it meant deleting a published Release and
+tag and force-pushing `main`.
+
+So when a change might break a consumer — a renamed or removed export, a default
+that flips, a helper that starts rejecting input it used to accept — **stop and
+ask**. Describe what breaks and for whom, and offer the alternatives: ship it as
+breaking, put the new behaviour behind an opt-in so nothing breaks, or drop it.
+Whether a change is worth a major version is the maintainer's call every time.
+The checklist below is how you prepare that question — not a licence to answer it
+yourself.
+
+Two related rules, learned the same day:
+
+- Never replay a PR branch's commits onto `origin/main` to reword them. Rebuild
+  onto the branch's own base commit, and check
+  `git merge-base --is-ancestor <new-head> origin/main` **fails** before pushing.
+  Making a PR's commits reachable from `main` is a merge whatever it is called,
+  and here a merge is a release.
+- `git diff old new` being empty does not make a force-push safe. It says the
+  content is unchanged; it says nothing about where the commits now sit.
+
 ## Before changing a public contract
 
 1. State the old behavior, proposed behavior, affected consumers, and why the
