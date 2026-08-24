@@ -852,13 +852,18 @@ def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
 
     directories = [m for m in seen if m.isdir()]
     assert directories, "the fallback path did not run"
-    import os as _os
-
-    mask = _os.umask(0)
-    _os.umask(mask)
-    expected = 0o777 & ~mask
+    # The destination's own mode, not a umask computation. This asserted
+    # `0o777 & ~umask` for one round and passed on Windows only by coincidence —
+    # there tmp_path is 0o777 and the umask is 0, so both sides were 0o777. On
+    # Linux tmp_path is 0o700 while the umask says 0o755, and CI failed on all
+    # three interpreters. The helper stopped reading the umask precisely because
+    # doing so is a process-global race, so a umask-derived expectation now
+    # describes an implementation that no longer exists.
+    expected = tmp_path.stat().st_mode & 0o777
     for member in directories:
-        assert member.mode == expected, "the directory mode ignores the umask"
+        assert member.mode == expected, (
+            "the directory mode should follow the destination it is created in"
+        )
         # Not None. This assertion said `is None` for one round, copying what the
         # `data` filter does — but the `mode is None` guard in TarFile.chmod
         # arrived together with filter support, so on the older releases this
