@@ -14,8 +14,11 @@ library documenting a single error class.
 from __future__ import annotations
 
 import base64
+import http.server
 import io
+import socketserver
 import tarfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -353,7 +356,7 @@ def test_a_url_with_a_forbidden_character_is_refused(url: str) -> None:
     """`urlopen` raises `InvalidURL` from inside http.client for these. The newline
     is the one that matters most: it is how a response would try to smuggle a
     second request line into the connection."""
-    with pytest.raises(ResponseError, match="space or control character"):
+    with pytest.raises(ResponseError, match="cannot appear in a request target"):
         download(url)
 
 
@@ -366,3 +369,108 @@ def test_a_destination_that_cannot_be_created_is_refused(tmp_path: Path) -> None
 
     with pytest.raises(ResponseError, match="destination could not be created"):
         extract(b"junk", blocker)
+
+
+# --- Round four: the same class again, found four more times ----------------
+#
+# Every one of these is an ordinary property of an untrusted response that the
+# standard library reports with an exception type the handler had not listed.
+# After four rounds the rule is stated in the module docstring: each stdlib call
+# here is a place a malformed response can speak, not only the ones that read
+# bytes.
+
+
+class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
+    """Declares 4096 bytes, sends 512, hangs up."""
+
+    def do_GET(self) -> None:  # noqa: N802 — stdlib's spelling
+        self.send_response(200)
+        self.send_header("Content-Length", "4096")
+        self.end_headers()
+        self.wfile.write(b"x" * 512)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        """Silence the default stderr access log."""
+
+
+def test_a_truncated_download_is_refused() -> None:
+    """A server closing before its declared Content-Length raises
+    `http.client.IncompleteRead` from `read()`. It is an HTTPException rather
+    than an OSError, so the interrupted-download case — the most ordinary
+    network failure there is — escaped every handler in `download`."""
+    server = socketserver.TCPServer(("127.0.0.1", 0), _TruncatingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(ResponseError, match="IncompleteRead"):
+            download(f"http://127.0.0.1:{server.server_address[1]}/a.tar")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_zip_with_a_corrupt_deflate_stream_is_refused(tmp_path: Path) -> None:
+    """Intact central directory, damaged payload: `is_zipfile` says yes and
+    `ZipFile()` opens it, so the damage surfaces as a raw `zlib.error` only when
+    extraction inflates the member."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("doc.md", "hello " * 400)
+    raw = bytearray(buffer.getvalue())
+    raw[45] ^= 0xFF
+    raw[46] ^= 0xFF
+
+    assert zipfile.is_zipfile(io.BytesIO(bytes(raw))), "the container must still parse"
+    with pytest.raises(ResponseError, match="could not be extracted"):
+        extract(bytes(raw), tmp_path / "out")
+
+
+def test_a_tar_with_a_corrupt_xz_stream_is_refused(tmp_path: Path) -> None:
+    """`lzma.LZMAError` is neither an OSError nor a TarError.
+
+    This one was not reported — it was found by asking whether the tar path had
+    the zip path's gap. It surfaces from `getmembers()` rather than from
+    `extractall()`, because enumerating a compressed tar decompresses the whole
+    stream, so widening only the extraction handler left it escaping."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:xz") as tar:
+        payload = ("hello " * 2000).encode()
+        info = tarfile.TarInfo("doc.md")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    raw = bytearray(buffer.getvalue())
+    midpoint = len(raw) // 2
+    for index in range(midpoint, min(midpoint + 32, len(raw))):
+        raw[index] ^= 0xFF
+
+    with pytest.raises(ResponseError, match="could not be read"):
+        extract(bytes(raw), tmp_path / "out")
+
+
+def test_a_non_ascii_url_is_refused() -> None:
+    """A request target is ASCII. `https://example.com/é` passes a scheme check
+    and then raises `UnicodeEncodeError` while the request line is encoded — a
+    caller meaning to fetch that path percent-encodes it, which is ASCII."""
+    with pytest.raises(ResponseError, match="cannot appear in a request target"):
+        download("https://example.com/é")
+
+
+@pytest.mark.parametrize("url", [None, 1234, b"https://example.com/a.tar", ["x"]])
+def test_a_url_that_is_not_a_string_is_refused(url: object) -> None:
+    """`for character in None` raises a bare TypeError from inside the function
+    whose whole job is to report bad input as ResponseError. A parsed response
+    honours its annotation only if the worker sent what it promised."""
+    with pytest.raises(ResponseError, match="should be a string"):
+        require_http_url(url)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("name", [123, ["a"], {}, 0.5, True])
+def test_an_output_name_that_is_not_a_string_is_refused(name: object) -> None:
+    """A truthy non-string reached `Path(name)` and raised TypeError. A falsy one
+    such as `{}` was caught, but reported as "not a usable filename" — the wrong
+    problem, which is its own small defect."""
+    with pytest.raises(ResponseError, match="should be a string"):
+        safe_output_name(name, what="a basename")  # type: ignore[arg-type]

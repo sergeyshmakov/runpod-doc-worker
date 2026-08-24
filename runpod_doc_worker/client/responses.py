@@ -31,12 +31,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import http.client
 import io
+import lzma
 import re
 import tarfile
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -50,8 +53,15 @@ class ResponseError(RuntimeError):
     exception from a library that documents a single error class. Every path that
     used to leak — ``tarfile.ReadError`` on a truncated body,
     ``zipfile.BadZipFile`` on a corrupt one, ``HTTPError``/``URLError``/bare
-    ``TimeoutError`` from a fetch, and ``binascii.Error`` from a decode — now
-    arrives as this.
+    ``TimeoutError`` from a fetch, ``IncompleteRead`` from an interrupted one,
+    ``zlib.error``/``LZMAError`` from a damaged compressed stream,
+    ``binascii.Error`` from a decode, and ``TypeError`` from a field that was
+    not the type it was annotated as — now arrives as this.
+
+    The recurring shape, learned over four review rounds on this one module: an
+    ordinary property of an untrusted response, reported by the standard library
+    with an exception type the handler did not list. Every stdlib call here is a
+    place a malformed response can speak, not only the ones that read bytes.
     """
 
 
@@ -63,6 +73,14 @@ DOWNLOAD_TIMEOUT_SECONDS = 120.0
 # Base64 alphabet plus the padding character. Used to report *what* is wrong with
 # a payload rather than only that something is.
 _B64_ALPHABET = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+
+# What a corrupt compressed stream raises from inside an archive reader. None of
+# these is an OSError or the archive module's own error type, so none was caught
+# by the handlers that look for those: `zlib.error` comes from a damaged deflate
+# stream in either container, `lzma.LZMAError` from a damaged xz tar, and
+# `EOFError` from one that ends mid-stream. bzip2 is absent on purpose — it
+# reports through OSError, which is already covered.
+_DECOMPRESSION_ERRORS = (zlib.error, lzma.LZMAError, EOFError)
 
 
 def within(destination: Path, name: str) -> bool:
@@ -89,6 +107,15 @@ def safe_output_name(name: str, *, what: str) -> str:
     a directory component means the caller is holding a result this code did not
     produce, and guessing what they meant is worse than saying so.
     """
+    # A parsed response honours its annotation only if the worker sent what it
+    # promised. A truthy non-string — `123`, `["a"]` — passed the emptiness check
+    # and then made `Path(name)` raise a bare TypeError; a falsy one such as `{}`
+    # was caught, but reported as "not a usable filename", which describes the
+    # wrong problem.
+    if not isinstance(name, str):
+        raise ResponseError(
+            f"{what} should be a string; got {type(name).__name__}"
+        )
     if not name or name in (".", ".."):
         raise ResponseError(f"refusing {what} {name!r}: not a usable filename")
     if name != Path(name).name or "/" in name or "\\" in name:
@@ -147,14 +174,26 @@ def require_http_url(url: str) -> None:
     connect time. Both escaped the single-error contract, so the parse happens here
     where it can be reported as one.
     """
-    # A space or a control character cannot appear in a request target, and
-    # `urlopen` raises `InvalidURL` from inside http.client when one does — past
-    # this function's contract. The newline is the one that matters most: it is how
-    # a response would try to smuggle a second request line into the connection.
+    if not isinstance(url, str):
+        # Iterating the characters below is the first thing that touches the
+        # value, and `for character in None` raises a bare TypeError from inside
+        # a function whose whole purpose is to report bad input as ResponseError.
+        raise ResponseError(f"a URL should be a string; got {type(url).__name__}")
+    # A request target is ASCII, and only its printable range. Everything outside
+    # that reaches the network layer as a raw exception rather than as this
+    # function's error: a space or control character raises `InvalidURL` from
+    # inside http.client, and a non-ASCII character such as the `é` in
+    # `https://example.com/é` raises `UnicodeEncodeError` while the request line
+    # is being encoded. A caller that means to fetch such a path percent-encodes
+    # it, which is ASCII; an IDN host needs punycode, which is also ASCII.
+    #
+    # The newline is the one that matters beyond tidy error types: it is how a
+    # response would try to smuggle a second request line into the connection.
     for character in url:
-        if character <= " " or character == "\x7f":
+        if not ("\x21" <= character <= "\x7e"):
             raise ResponseError(
-                f"refusing to fetch {url!r}: contains a space or control character"
+                f"refusing to fetch {url!r}: {character!r} cannot appear in a "
+                f"request target (expected printable ASCII, percent-encoded)"
             )
     try:
         parts = urlsplit(url)
@@ -189,6 +228,16 @@ def download(url: str) -> bytes:
         raise ResponseError(f"fetching the archive failed: HTTP {e.code}") from e
     except urllib.error.URLError as e:
         raise ResponseError(f"fetching the archive failed: {e.reason}") from e
+    except http.client.HTTPException as e:
+        # A server that closes after sending fewer bytes than its declared
+        # Content-Length raises `IncompleteRead` from `read()` — an interrupted
+        # download, the most ordinary failure there is, and an HTTPException
+        # rather than an OSError, so it escaped every handler here. The base
+        # class covers its siblings too: a malformed status line, an
+        # over-long header.
+        raise ResponseError(
+            f"fetching the archive failed: {type(e).__name__}: {e}"
+        ) from e
     except (TimeoutError, OSError) as e:
         # TimeoutError arrives unwrapped when the stall is in the response body
         # rather than the connect, and URLError is itself an OSError — so this
@@ -208,7 +257,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     """
     try:
         tar_file = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
-    except tarfile.TarError as e:
+    except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
         # A truncated download, or a body that was never a tar. Raised before any
         # of the safety checks below could run, so it used to bypass them and the
         # client's error type together.
@@ -217,9 +266,15 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     with tar_file as tar:
         try:
             members = tar.getmembers()
-        except tarfile.TarError as e:
+        except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
             # A tar truncated after a valid first header opens cleanly and fails
             # here, so the extraction handler below was never reached.
+            #
+            # Enumerating a *compressed* tar decompresses the whole stream, which
+            # makes this — not the extraction below — where damage deep inside an
+            # xz or gzip stream actually surfaces, as `LZMAError` or `zlib.error`.
+            # Widening only the extraction handler left this case escaping, which
+            # is why the fix was verified by reproduction rather than by reading.
             raise ResponseError(f"the archive could not be read: {e}") from e
         for member in members:
             if not (member.isfile() or member.isdir()):
@@ -238,13 +293,19 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # Older patch releases have no filter parameter; the checks above
                 # already made this safe.
                 tar.extractall(destination)  # noqa: S202
-        except (tarfile.TarError, OSError) as e:
+        except (tarfile.TarError, OSError, *_DECOMPRESSION_ERRORS) as e:
             # TarError covers truncation, which is only discovered on read for a
             # streamed member. OSError covers the destination refusing the write —
             # a file member landing where a directory already exists raises
             # IsADirectoryError or PermissionError, which describes a response this
             # code cannot use rather than a bug in the caller. The zip path below
             # already caught OSError; this one did not.
+            #
+            # The decompression errors are here for the case `tarfile.open` cannot
+            # see: corruption deep in a compressed stream. The header decompresses,
+            # the archive opens, and the damage surfaces only when extraction reads
+            # that far — as `LZMAError` for an xz tar, verified escaping this
+            # handler before the tuple was widened.
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
@@ -264,12 +325,23 @@ def _extract_zip(data: bytes, destination: Path) -> None:
                 )
         try:
             archive.extractall(destination)  # noqa: S202 — names checked above
-        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError) as e:
+        except (
+            zipfile.BadZipFile,
+            OSError,
+            RuntimeError,
+            NotImplementedError,
+            *_DECOMPRESSION_ERRORS,
+        ) as e:
             # RuntimeError is what an encrypted member raises, and
             # NotImplementedError an unsupported compression method. Both describe
             # an archive this code cannot read rather than a programming error, and
             # treating an untrusted archive as untrusted means they belong inside
             # the contract.
+            #
+            # The decompression errors cover the case the header cannot reveal: a
+            # zip whose central directory is intact — so `is_zipfile` says yes and
+            # `ZipFile()` opens it — but whose deflate payload has a flipped byte.
+            # That surfaces as a raw `zlib.error` only once extraction inflates it.
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
