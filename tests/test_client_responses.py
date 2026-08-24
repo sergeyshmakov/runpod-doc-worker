@@ -657,3 +657,82 @@ def test_a_destination_with_a_nul_is_refused() -> None:
     version of this fix did not."""
     with pytest.raises(ResponseError):
         extract(b"x", "bad\0dir")
+
+
+# --- Round nine: authority, redirects, usable modes, strided buffers ---------
+
+
+def test_percent_encoded_userinfo_is_refused() -> None:
+    """Only the hostname was decoded and checked, so `http://%FF@example.com/`
+    passed and then raised UnicodeEncodeError building the Authorization header.
+    Checking one component of a string that gets decoded in several places is a
+    check in the wrong place."""
+    with pytest.raises(ResponseError, match="not ASCII once percent-decoded"):
+        download("http://%FF@example.com/")
+
+
+def test_a_malformed_redirect_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validating the URL handed in says nothing about where the server sends us
+    next. urllib follows redirects internally, so a `Location` of `http://[bad`
+    raises ValueError from inside urlopen without passing through the
+    validator."""
+    def exploding_urlopen(*args: object, **kwargs: object):
+        raise ValueError("Invalid IPv6 URL")
+
+    monkeypatch.setattr(urllib.request, "urlopen", exploding_urlopen)
+    with pytest.raises(ResponseError, match="fetching the archive failed"):
+        download("https://example.com/out.tar.gz")
+
+
+@pytest.mark.parametrize("payload", [memoryview(b"abcdef")[::2], memoryview(b"abcdef")[::-1]])
+def test_a_strided_memoryview_is_handled(payload: object, tmp_path: Path) -> None:
+    """The type check advertised `memoryview`, but BytesIO needs a contiguous
+    buffer, so a strided view reached archive detection and raised BufferError.
+    It is normalised rather than rejected, since a contiguous view is genuinely
+    fine and the copy only happens for the odd case — so this surfaces as an
+    ordinary "not an archive" refusal."""
+    with pytest.raises(ResponseError):
+        extract(payload, tmp_path)  # type: ignore[arg-type]
+
+
+@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
+def test_the_legacy_tar_fallback_leaves_usable_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clearing the dangerous bits is only half of what `filter="data"` does.
+
+    It also makes the result usable: a regular file gets owner read/write and an
+    archived directory mode is ignored in favour of something traversable. The
+    previous fix only removed bits, so a member stored as mode 000 extracted as
+    000 and the client was handed a file it could not open while the job looked
+    like a success.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        locked = tarfile.TarInfo("locked.txt")
+        locked.size = 0
+        locked.mode = 0o000
+        tar.addfile(locked, io.BytesIO(b""))
+        folder = tarfile.TarInfo("sub")
+        folder.type = tarfile.DIRTYPE
+        folder.mode = 0o000
+        tar.addfile(folder)
+
+    seen: list[tarfile.TarInfo] = []
+    real_extractall = tarfile.TarFile.extractall
+
+    def fake_extractall(self, path=None, members=None, **kwargs):
+        if "filter" in kwargs:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        seen.extend(members or [])
+        return real_extractall(self, path, members)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+    extract(buffer.getvalue(), tmp_path)
+
+    assert seen, "the fallback path did not run"
+    by_name = {member.name: member for member in seen}
+    assert by_name["locked.txt"].mode & 0o600 == 0o600, "the file is unreadable"
+    assert by_name["sub"].mode & 0o500 == 0o500, "the directory is not traversable"
+    for member in seen:
+        assert not member.mode & 0o7022, "an unsafe bit survived"

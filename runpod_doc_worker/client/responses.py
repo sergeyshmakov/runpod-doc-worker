@@ -249,11 +249,17 @@ def require_fetchable_url(url: str) -> None:
     # authority, gets U+FFFD, and raises UnicodeEncodeError building the latin-1
     # Host header. A real IDN host arrives already punycoded (`xn--…`), which is
     # ASCII, so nothing legitimate decodes to non-ASCII here.
+    # The whole authority, not just the host: userinfo is percent-decoded for the
+    # Authorization header the same way the host is for the Host header, so
+    # `http://%FF@example.com/` passed a hostname-only check and still raised
+    # UnicodeEncodeError from inside urlopen. Checking one component of a string
+    # that gets decoded in several places is a check in the wrong place.
     try:
-        unquote(host, errors="strict").encode("ascii")
+        unquote(parts.netloc, errors="strict").encode("ascii")
     except (UnicodeDecodeError, UnicodeEncodeError) as e:
         raise ResponseError(
-            f"refusing to fetch {url!r}: host is not ASCII once percent-decoded"
+            f"refusing to fetch {url!r}: the authority is not ASCII once "
+            f"percent-decoded"
         ) from e
 
 
@@ -289,6 +295,15 @@ def download(url: str) -> bytes:
         # TimeoutError arrives unwrapped when the stall is in the response body
         # rather than the connect, and URLError is itself an OSError — so this
         # stays last to remain reachable.
+        raise ResponseError(
+            f"fetching the archive failed: {type(e).__name__}: {e}"
+        ) from e
+    except (ValueError, UnicodeError) as e:
+        # Validating the URL handed in says nothing about where the server sends
+        # us next: urllib follows redirects internally, and a `Location` of
+        # `http://[bad` raises ValueError from inside urlopen without ever passing
+        # through require_fetchable_url. A response's redirect target is as
+        # untrusted as its body.
         raise ResponseError(
             f"fetching the archive failed: {type(e).__name__}: {e}"
         ) from e
@@ -346,6 +361,17 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # especially with a client running as root.
                 for member in members:
                     member.mode &= ~_UNSAFE_MODE_BITS
+                    # Clearing the dangerous bits is only half of what the `data`
+                    # filter does. It also makes the result *usable*: a regular
+                    # file gets owner read/write, and an archived directory mode
+                    # is ignored in favour of something traversable. Without this
+                    # a member stored as mode 000 extracted as 000, so the client
+                    # was handed a file it could not open and the job looked like
+                    # a success.
+                    if member.isdir():
+                        member.mode = 0o755
+                    else:
+                        member.mode |= 0o600
                     member.uid, member.gid = 0, 0
                     member.uname, member.gname = "", ""
                 tar.extractall(destination, members=members)  # noqa: S202
@@ -416,6 +442,16 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
         raise ResponseError(
             f"an archive should be bytes; got {type(data).__name__}"
         )
+    try:
+        # Accepting `memoryview` in the check above advertised an input this
+        # function could not actually take: `BytesIO` needs a contiguous buffer,
+        # so a strided view such as `memoryview(b"abcdef")[::2]` reached archive
+        # detection and raised a bare BufferError. Normalising here is better
+        # than narrowing the check, because a contiguous view is genuinely fine
+        # and the copy only happens for the odd case.
+        data = bytes(data)
+    except (BufferError, ValueError, TypeError) as e:
+        raise ResponseError(f"the archive payload could not be read: {e}") from e
     try:
         destination = Path(dest_dir).resolve()
     except (TypeError, ValueError, OSError) as e:
