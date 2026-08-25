@@ -38,6 +38,7 @@ import os
 import time
 import re
 import tarfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -202,7 +203,17 @@ def _check_member_collisions(names: list[str], *, container: str) -> None:
     """
     seen: dict[str, str] = {}
     for name in names:
-        folded = name.replace("\\", "/").casefold().rstrip("/")
+        # Canonicalised the way the extractor resolves it, not merely folded.
+        # `zipfile` drops `.` components while extracting, so `a/./b.txt` and
+        # `a/b.txt` are the same destination -- and comparing the raw strings said
+        # they differed, so the second silently overwrote the first. Folding
+        # answers "same name"; this has to answer "same file".
+        parts = [
+            part
+            for part in name.replace("\\", "/").split("/")
+            if part not in ("", ".")
+        ]
+        folded = "/".join(parts).casefold()
         if not folded:
             continue
         first = seen.get(folded)
@@ -578,6 +589,40 @@ def _opener() -> urllib.request.OpenerDirector:
     return opener
 
 
+def _fetch(url: str) -> bytes:
+    """Open, read and return the body. Blocking; bounded by its caller."""
+    with _opener().open(  # noqa: S310 - scheme checked, redirects checked
+        url, timeout=DOWNLOAD_TIMEOUT_SECONDS
+    ) as response:
+        declared = response.headers.get("Content-Length")
+        if declared and declared.isdigit() and int(declared) > MAX_ARCHIVE_BYTES:
+            raise ResponseError(
+                f"the archive is {int(declared)} bytes, over the "
+                f"{MAX_ARCHIVE_BYTES}-byte limit"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ResponseError(
+                    f"the archive exceeds the {MAX_ARCHIVE_BYTES}-byte limit"
+                )
+            chunks.append(chunk)
+        # Reading in chunks loses the truncation check `read()` performs for free:
+        # `read(n)` returns what has arrived and then b"" at EOF, so a server that
+        # hangs up early yields a short body rather than IncompleteRead.
+        if declared and declared.isdigit() and total < int(declared):
+            raise ResponseError(
+                f"fetching the archive failed: IncompleteRead "
+                f"({total} bytes read, {int(declared) - total} more expected)"
+            )
+        return b"".join(chunks)
+
+
 def download(url: str) -> bytes:
     """Fetch an archive. Network failures arrive as :class:`ResponseError`.
 
@@ -585,94 +630,60 @@ def download(url: str) -> bytes:
     used to surface as urllib exceptions straight past a client's own handler.
     The ordinary case is the expired URL, which is also the one a caller most
     needs to catch.
+
+    The fetch runs on a worker thread joined against a deadline. Two earlier
+    attempts checked a clock in the read loop, and neither bounded anything: the
+    timeout urllib takes is an *idle* socket timeout, so a server trickling header
+    bytes can keep ``open()`` inside the network stack indefinitely, and a
+    trickled chunk does the same to a single ``read()``. A clock consulted after a
+    blocking call returns cannot bound that call -- the only way to bound it from
+    here is to stop waiting on it.
+
+    The thread is a daemon, so an abandoned fetch cannot keep the process alive;
+    it ends on its own when the socket timeout fires.
     """
     require_fetchable_url(url)
-    # Started before `open()`, not after it. Connection setup, every redirect hop
-    # and the response headers all happen inside that call, and a server can
-    # trickle header bytes often enough to keep the per-socket idle timeout from
-    # firing -- so a timer started afterwards bounded only the part that was
-    # already bounded by the byte cap.
-    started = time.monotonic()
-    try:
-        with _opener().open(  # noqa: S310 - scheme checked, redirects checked
-            url, timeout=DOWNLOAD_TIMEOUT_SECONDS
-        ) as response:
-            # Read in bounded chunks rather than `response.read()`. The socket
-            # timeout only bounds *idle* time, so a peer that keeps sending can
-            # hold the connection open indefinitely and grow this buffer without
-            # ever tripping it. The declared Content-Length is not trusted for
-            # this - it is checked as an early exit, but the running total is what
-            # actually stops the read.
-            declared = response.headers.get("Content-Length")
-            if declared and declared.isdigit() and int(declared) > MAX_ARCHIVE_BYTES:
-                raise ResponseError(
-                    f"the archive is {int(declared)} bytes, over the "
-                    f"{MAX_ARCHIVE_BYTES}-byte limit"
-                )
-            if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
-                raise ResponseError(
-                    f"fetching the archive exceeded "
-                    f"{DOWNLOAD_DEADLINE_SECONDS:.0f}s before the body arrived"
-                )
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
-                    raise ResponseError(
-                        f"fetching the archive exceeded "
-                        f"{DOWNLOAD_DEADLINE_SECONDS:.0f}s"
-                    )
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_ARCHIVE_BYTES:
-                    raise ResponseError(
-                        f"the archive exceeds the {MAX_ARCHIVE_BYTES}-byte limit"
-                    )
-                chunks.append(chunk)
-            # Reading in chunks loses the truncation check that `read()` performs
-            # for free: `read(n)` returns what has arrived and then returns b"" at
-            # EOF, so a server that hangs up early yields a short body instead of
-            # `IncompleteRead`. Bounding the read silently disabled the detection
-            # of a truncated one, which an existing test caught. Compared against
-            # the declared length here instead.
-            if declared and declared.isdigit() and total < int(declared):
-                raise ResponseError(
-                    f"fetching the archive failed: IncompleteRead "
-                    f"({total} bytes read, {int(declared) - total} more expected)"
-                )
-            return b"".join(chunks)
-    except urllib.error.HTTPError as e:
-        raise ResponseError(f"fetching the archive failed: HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        raise ResponseError(f"fetching the archive failed: {e.reason}") from e
-    except http.client.HTTPException as e:
-        # A server that closes after sending fewer bytes than its declared
-        # Content-Length raises `IncompleteRead` from `read()` — an interrupted
-        # download, the most ordinary failure there is, and an HTTPException
-        # rather than an OSError, so it escaped every handler here. The base
-        # class covers its siblings too: a malformed status line, an
-        # over-long header.
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["body"] = _fetch(url)
+        except BaseException as error:  # noqa: BLE001 - re-raised on the caller
+            outcome["error"] = error
+
+    worker = threading.Thread(target=run, name="runpod-doc-worker-fetch", daemon=True)
+    worker.start()
+    worker.join(DOWNLOAD_DEADLINE_SECONDS)
+    if worker.is_alive():
         raise ResponseError(
-            f"fetching the archive failed: {type(e).__name__}: {e}"
-        ) from e
-    except (TimeoutError, OSError) as e:
-        # TimeoutError arrives unwrapped when the stall is in the response body
-        # rather than the connect, and URLError is itself an OSError — so this
-        # stays last to remain reachable.
-        raise ResponseError(
-            f"fetching the archive failed: {type(e).__name__}: {e}"
-        ) from e
-    except (ValueError, UnicodeError) as e:
-        # Validating the URL handed in says nothing about where the server sends
-        # us next: urllib follows redirects internally, and a `Location` of
-        # `http://[bad` raises ValueError from inside urlopen without ever passing
-        # through require_fetchable_url. A response's redirect target is as
-        # untrusted as its body.
-        raise ResponseError(
-            f"fetching the archive failed: {type(e).__name__}: {e}"
-        ) from e
+            f"fetching the archive exceeded {DOWNLOAD_DEADLINE_SECONDS:.0f}s"
+        )
+
+    error = outcome.get("error")
+    if error is not None:
+        if isinstance(error, ResponseError):
+            raise error
+        if isinstance(error, urllib.error.HTTPError):
+            raise ResponseError(
+                f"fetching the archive failed: HTTP {error.code}"
+            ) from error
+        if isinstance(error, urllib.error.URLError):
+            raise ResponseError(
+                f"fetching the archive failed: {error.reason}"
+            ) from error
+        if isinstance(error, http.client.HTTPException):
+            raise ResponseError(
+                f"fetching the archive failed: {type(error).__name__}: {error}"
+            ) from error
+        if isinstance(error, (TimeoutError, OSError, ValueError, UnicodeError)):
+            raise ResponseError(
+                f"fetching the archive failed: {type(error).__name__}: {error}"
+            ) from error
+        raise error
+    body = outcome.get("body")
+    if not isinstance(body, bytes):  # pragma: no cover - defensive
+        raise ResponseError("fetching the archive produced no body")
+    return body
 
 
 def _extract_tar(data: bytes, destination: Path) -> None:
@@ -846,6 +857,16 @@ def _counted_zip_entries(data: bytes, limit: int) -> int | None:
             return None
         size = int.from_bytes(tail[at64 + 40 : at64 + 48], "little")
         offset = int.from_bytes(tail[at64 + 48 : at64 + 56], "little")
+    # A self-extracting zip carries a stub before the archive, and the offsets in
+    # the EOCD are relative to the *embedded* archive rather than to the file.
+    # `ZipFile` corrects for that by measuring the discrepancy; using the raw
+    # offset landed in the stub, the scan gave up and returned None, and the
+    # preflight it was meant to perform was skipped entirely.
+    eocd_at = base + at
+    prepended = eocd_at - (offset + size)
+    if prepended < 0:
+        return None
+    offset += prepended
     end = offset + size
     if offset < 0 or end > len(data) or size < 0:
         return None
@@ -862,7 +883,6 @@ def _counted_zip_entries(data: bytes, limit: int) -> int | None:
         count += 1
         if count > limit:
             return count
-    _ = base
     return count
 
 

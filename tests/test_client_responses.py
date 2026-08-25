@@ -1728,3 +1728,98 @@ def test_the_decompression_tuple_tracks_the_interpreter() -> None:
         assert "ZstdError" not in names
     else:
         assert "ZstdError" in names
+
+
+# --- Round twenty-two: canonical paths, prepended data, a real deadline ------
+
+
+def test_dot_components_collide_with_their_canonical_form(tmp_path: Path) -> None:
+    """`a/./b.txt` and `a/b.txt` fold differently as strings and extract to the
+    same place, because `zipfile` drops `.` components. Folding answers "same
+    name"; the check has to answer "same file"."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a/./b.txt", "first")
+        archive.writestr("a/b.txt", "second")
+    with pytest.raises(ResponseError, match="case-insensitive"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_the_preflight_accounts_for_prepended_data() -> None:
+    """A self-extracting zip carries a stub, and the EOCD offsets are relative to
+    the embedded archive. `ZipFile` corrects for the discrepancy; the scan used
+    the raw offset, landed in the stub, gave up, and skipped the preflight
+    entirely — so an over-limit archive got through by being self-extracting."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(30):
+            archive.writestr(f"f{index}.txt", "")
+    plain = buffer.getvalue()
+    with_stub = b"MZ" + b"stub" * 500 + plain
+
+    assert responses._counted_zip_entries(plain, 100) == 30
+    assert responses._counted_zip_entries(with_stub, 100) == 30
+
+
+def test_a_self_extracting_archive_cannot_bypass_the_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(30):
+            archive.writestr(f"f{index}.txt", "")
+    with_stub = b"MZ" + b"stub" * 500 + buffer.getvalue()
+    with pytest.raises(ResponseError, match="over"):
+        extract(with_stub, tmp_path)
+
+
+def test_the_deadline_bounds_a_blocking_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two earlier attempts checked a clock in the read loop, and neither bounded
+    anything: the timeout urllib takes is an *idle* socket timeout, so a server
+    trickling header bytes keeps `open()` inside the network stack indefinitely.
+
+    A clock consulted after a blocking call returns cannot bound that call. The
+    fetch runs on a daemon thread joined against the deadline, so the only way to
+    bound it — stopping waiting on it — is what actually happens.
+    """
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+
+    class _NeverReturns:
+        def open(self, *args: object, **kwargs: object):
+            time.sleep(30)
+
+    monkeypatch.setattr(responses, "_opener", lambda: _NeverReturns())
+    started = time.monotonic()
+    with pytest.raises(ResponseError, match="exceeded"):
+        download("https://example.com/blocked.tar")
+    assert time.monotonic() - started < 5, "the call must not wait for the sleep"
+
+
+def test_a_successful_fetch_still_returns_its_body(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The thread has to hand the body back, not just the failures."""
+
+    class _Body:
+        headers = {"Content-Length": "5"}
+
+        def __init__(self) -> None:
+            self._sent = False
+
+        def read(self, size: int = -1) -> bytes:
+            if self._sent:
+                return b""
+            self._sent = True
+            return b"hello"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Body()})()
+    )
+    assert download("https://example.com/ok.tar") == b"hello"
