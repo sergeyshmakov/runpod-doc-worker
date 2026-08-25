@@ -34,15 +34,21 @@ import pytest
 
 from runpod_doc_worker.client import (
     ResponseError,
+    archives,
     decode_b64,
     download,
+    errors,
     extract,
+    fetch,
+    limits,
+    names,
     require_fetchable_url,
-    responses,
     safe_output_name,
+    tarballs,
     within,
+    zips,
 )
-from runpod_doc_worker.client.responses import MAX_METADATA_BYTES
+from runpod_doc_worker.client.limits import MAX_METADATA_BYTES
 
 # -----------------------------------------------------------------------------
 # Strict base64
@@ -186,7 +192,7 @@ def test_a_fetch_failure_is_refused(monkeypatch: pytest.MonkeyPatch, raised) -> 
         def open(self, *args: object, **kwargs: object):
             raise raised
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: _Exploding())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -648,7 +654,7 @@ def test_a_malformed_redirect_target_is_refused(monkeypatch: pytest.MonkeyPatch)
         def open(self, *args: object, **kwargs: object):
             raise ValueError("Invalid IPv6 URL")
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: _Exploding())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -707,7 +713,7 @@ def test_a_redirect_to_another_scheme_is_refused() -> None:
     redirecting server, because the check belongs to the handler and this keeps
     the test off the network.
     """
-    from runpod_doc_worker.client.responses import _CheckedRedirectHandler
+    from runpod_doc_worker.client.fetch import _CheckedRedirectHandler
 
     handler = _CheckedRedirectHandler()
     with pytest.raises(ResponseError, match="expected an http"):
@@ -718,7 +724,7 @@ def test_the_opener_offers_only_http_handlers() -> None:
     """The opener is built explicitly instead of using the module default, whose
     handler set includes FTP and local file access — capabilities this function
     has no use for and cannot safely offer an untrusted URL."""
-    from runpod_doc_worker.client.responses import _opener
+    from runpod_doc_worker.client.fetch import _opener
 
     names = {type(h).__name__ for h in _opener().handlers}
     assert "FTPHandler" not in names
@@ -951,8 +957,11 @@ def test_names_merely_containing_a_device_name_still_pass(name: str) -> None:
 
 def test_the_module_no_longer_touches_the_umask() -> None:
     """Structural, because the race is invisible in a single-threaded test: the
-    only safe amount of `os.umask` in this module is none."""
-    source = Path(responses.__file__).read_text(encoding="utf-8")
+    only safe amount of `os.umask` in this package is none."""
+    source = "".join(
+        Path(module.__file__).read_text(encoding="utf-8")
+        for module in (archives, fetch, names, tarballs, zips)
+    )
     assert "os.umask" not in source
 
 
@@ -1009,7 +1018,7 @@ def test_an_empty_zip_is_still_recognised(tmp_path: Path) -> None:
 def test_an_oversized_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """The socket timeout bounds idle time, not total volume, so a peer that keeps
     sending holds the connection and grows the buffer without ever tripping it."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_BYTES", 4096)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_BYTES", 4096)
 
     class _Endless:
         headers: dict[str, str] = {}
@@ -1023,7 +1032,7 @@ def test_an_oversized_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> No
         def __exit__(self, *exc: object) -> None:
             return None
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Endless()})())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Endless()})())
     with pytest.raises(ResponseError, match="limit"):
         download("https://example.com/endless.tar")
 
@@ -1031,7 +1040,7 @@ def test_an_oversized_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> No
 def test_a_declared_oversize_is_refused_before_reading(monkeypatch: pytest.MonkeyPatch) -> None:
     """An early exit on Content-Length, which is a courtesy rather than the
     protection - the running total is what actually stops an untruthful one."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_BYTES", 4096)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_BYTES", 4096)
 
     class _Declared:
         headers = {"Content-Length": "999999999"}
@@ -1045,7 +1054,7 @@ def test_a_declared_oversize_is_refused_before_reading(monkeypatch: pytest.Monke
         def __exit__(self, *exc: object) -> None:
             return None
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Declared()})())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Declared()})())
     with pytest.raises(ResponseError, match="over the"):
         download("https://example.com/huge.tar")
 
@@ -1055,7 +1064,7 @@ def test_a_zip_declaring_a_huge_expansion_is_refused(
 ) -> None:
     """A decompression bomb: small compressed, enormous expanded. The download cap
     says nothing about it, because what that bounds is the compressed form."""
-    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 1024)
+    monkeypatch.setattr(limits, "MAX_EXTRACTED_BYTES", 1024)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("bomb.txt", "0" * 100_000)
@@ -1067,7 +1076,7 @@ def test_a_zip_declaring_a_huge_expansion_is_refused(
 def test_a_zip_declaring_too_many_members_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 3)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 3)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(5):
@@ -1107,7 +1116,7 @@ def test_a_tar_declaring_too_many_members_is_refused(
 ) -> None:
     """The quotas were enforced only by the zip path, so the protection depended
     on which container the worker happened to send."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 10)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 10)
     with pytest.raises(ResponseError, match="members"):
         extract(_tar_of([f"f{i}.txt" for i in range(50)]), tmp_path)
 
@@ -1117,7 +1126,7 @@ def test_a_compressed_tar_declaring_a_huge_expansion_is_refused(
 ) -> None:
     """A compressed tar hides the ratio exactly as a zip does: the reproduction
     was a 541-byte gzip expanding to 50 KB."""
-    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 1000)
+    monkeypatch.setattr(limits, "MAX_EXTRACTED_BYTES", 1000)
     data = _tar_of([f"f{i}.txt" for i in range(50)], size=1000, mode="w:gz")
     assert len(data) < 5000, "the archive itself must be small"
     with pytest.raises(ResponseError, match="expands to"):
@@ -1184,7 +1193,7 @@ def test_one_rule_answers_for_both_callers(name: str, tmp_path: Path) -> None:
     """The invariant the fix establishes: a name unusable as an output is also
     unusable as a member. Asserted as agreement rather than as two lists, since
     two lists is exactly what drifted."""
-    assert responses._windows_component_problem(name) is not None
+    assert names._windows_component_problem(name) is not None
     with pytest.raises(ResponseError):
         safe_output_name(name, what="a basename")
     with pytest.raises(ResponseError):
@@ -1194,8 +1203,8 @@ def test_one_rule_answers_for_both_callers(name: str, tmp_path: Path) -> None:
 def test_the_reason_given_is_the_most_specific_one() -> None:
     """`NUL.` is a device name that also ends in a dot; the device reason is the
     useful one, so the checks are ordered most specific first."""
-    assert "device name" in (responses._windows_component_problem("NUL.") or "")
-    assert "trailing dot" in (responses._windows_component_problem("report.") or "")
+    assert "device name" in (names._windows_component_problem("NUL.") or "")
+    assert "trailing dot" in (names._windows_component_problem("report.") or "")
 
 
 def test_tar_quotas_abort_during_enumeration(
@@ -1205,7 +1214,7 @@ def test_tar_quotas_abort_during_enumeration(
     TarInfo before either quota can be read, so a tiny archive declaring millions
     of headers exhausts memory before `len(members)` is reached. Walking
     incrementally bounds the cost by the quota instead of by the archive."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 5)
     with pytest.raises(ResponseError, match="members"):
         extract(_tar_of([f"f{i}.txt" for i in range(200)]), tmp_path)
 
@@ -1213,7 +1222,7 @@ def test_tar_quotas_abort_during_enumeration(
 def test_the_size_quota_also_aborts_during_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 500)
+    monkeypatch.setattr(limits, "MAX_EXTRACTED_BYTES", 500)
     with pytest.raises(ResponseError, match="expands to"):
         extract(_tar_of([f"f{i}.txt" for i in range(20)], size=100, mode="w:gz"), tmp_path)
 
@@ -1224,7 +1233,7 @@ def test_a_download_that_never_finishes_hits_the_deadline(
     """The socket timeout bounds idle time and is reset by every successful read,
     so a peer trickling bytes can hold the call open indefinitely without ever
     approaching the byte cap."""
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.05)
 
     class _Trickle:
         headers: dict[str, str] = {}
@@ -1240,7 +1249,7 @@ def test_a_download_that_never_finishes_hits_the_deadline(
             return None
 
     monkeypatch.setattr(
-        responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Trickle()})()
+        fetch, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Trickle()})()
     )
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/trickle.tar")
@@ -1256,7 +1265,7 @@ def test_the_deadline_covers_connection_and_headers(
     redirect hop and the response headers were all outside it — and a server can
     trickle header bytes often enough that the per-socket idle timeout never
     fires. A deadline that begins after the slow part is not a deadline."""
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.01)
 
     class _SlowOpen:
         def open(self, *args: object, **kwargs: object):
@@ -1276,7 +1285,7 @@ def test_the_deadline_covers_connection_and_headers(
 
             return _Empty()
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: _SlowOpen())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: _SlowOpen())
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/slow.tar")
 
@@ -1296,14 +1305,14 @@ def test_the_zip_entry_count_is_counted_not_trusted(tmp_path: Path) -> None:
         for index in range(40):
             archive.writestr(f"f{index}.txt", "")
     honest = buffer.getvalue()
-    assert responses._counted_zip_entries(honest, 100) == 40
+    assert zips._counted_zip_entries(honest, 100) == 40
 
     # Same archive, both EOCD count fields rewritten to claim one entry.
     lying = bytearray(honest)
     at = lying.rfind(b"PK\x05\x06")
     lying[at + 8 : at + 10] = (1).to_bytes(2, "little")
     lying[at + 10 : at + 12] = (1).to_bytes(2, "little")
-    assert responses._counted_zip_entries(bytes(lying), 100) == 40, (
+    assert zips._counted_zip_entries(bytes(lying), 100) == 40, (
         "the count must come from the records, not the claim"
     )
 
@@ -1318,7 +1327,7 @@ def test_a_zip_declaring_too_many_entries_is_refused_before_parsing(
     Same shape as the tar `getmembers()` finding — and the same mistake of fixing
     one container and leaving the other.
     """
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 10)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 10)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(40):
@@ -1332,7 +1341,7 @@ def test_the_preflight_declines_to_guess(tmp_path: Path) -> None:
     pre-filter and `ZipFile` stays the authority on readability. A body with no
     EOCD must not be refused *by the preflight* — it is refused, but as an
     unreadable archive."""
-    assert responses._counted_zip_entries(b"not an archive at all", 100) is None
+    assert zips._counted_zip_entries(b"not an archive at all", 100) is None
     with pytest.raises(ResponseError, match="could not be read"):
         extract(b"PK\x03\x04 truncated", tmp_path)
 
@@ -1390,7 +1399,7 @@ def test_a_lying_entry_count_does_not_bypass_the_quota(
     declared byte size — so an archive can say one entry and carry thirty, and a
     preflight that trusted the number was no protection against the case it
     existed for."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 5)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(30):
@@ -1411,7 +1420,7 @@ def test_the_count_walk_is_bounded(tmp_path: Path) -> None:
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(50):
             archive.writestr(f"f{index}.txt", "")
-    assert responses._counted_zip_entries(buffer.getvalue(), 5) == 6
+    assert zips._counted_zip_entries(buffer.getvalue(), 5) == 6
 
 
 def test_the_decompression_tuple_tracks_the_interpreter() -> None:
@@ -1422,7 +1431,7 @@ def test_the_decompression_tuple_tracks_the_interpreter() -> None:
     Asserted as a property of the running interpreter rather than a fixed list, so
     the test says the same thing on every supported release.
     """
-    names = {error.__name__ for error in responses._DECOMPRESSION_ERRORS}
+    names = {error.__name__ for error in errors._DECOMPRESSION_ERRORS}
     assert {"error", "LZMAError", "EOFError"} <= names
     try:
         from compression.zstd import ZstdError  # noqa: F401
@@ -1459,14 +1468,14 @@ def test_the_preflight_accounts_for_prepended_data() -> None:
     plain = buffer.getvalue()
     with_stub = b"MZ" + b"stub" * 500 + plain
 
-    assert responses._counted_zip_entries(plain, 100) == 30
-    assert responses._counted_zip_entries(with_stub, 100) == 30
+    assert zips._counted_zip_entries(plain, 100) == 30
+    assert zips._counted_zip_entries(with_stub, 100) == 30
 
 
 def test_a_self_extracting_archive_cannot_bypass_the_quota(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 5)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(30):
@@ -1485,13 +1494,13 @@ def test_the_deadline_bounds_a_blocking_open(monkeypatch: pytest.MonkeyPatch) ->
     fetch runs on a daemon thread joined against the deadline, so the only way to
     bound it — stopping waiting on it — is what actually happens.
     """
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
 
     class _NeverReturns:
         def open(self, *args: object, **kwargs: object):
             time.sleep(30)
 
-    monkeypatch.setattr(responses, "_opener", lambda *_: _NeverReturns())
+    monkeypatch.setattr(fetch, "_opener", lambda *_: _NeverReturns())
     started = time.monotonic()
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/blocked.tar")
@@ -1522,7 +1531,7 @@ def test_a_successful_fetch_still_returns_its_body(
             return None
 
     monkeypatch.setattr(
-        responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Body()})()
+        fetch, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Body()})()
     )
     assert download("https://example.com/ok.tar") == b"hello"
 
@@ -1565,7 +1574,7 @@ def test_a_zip64_archive_is_still_counted() -> None:
         info = zipfile.ZipInfo("big.bin")
         with archive.open(info, "w", force_zip64=True) as handle:
             handle.write(b"x")
-    assert responses._counted_zip_entries(buffer.getvalue(), 100) == 41
+    assert zips._counted_zip_entries(buffer.getvalue(), 100) == 41
 
 
 def test_a_timed_out_fetch_closes_its_response(
@@ -1578,7 +1587,7 @@ def test_a_timed_out_fetch_closes_its_response(
     The response is closed on timeout, which makes the blocked read fail and
     releases the connection immediately.
     """
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
     closed: list[bool] = []
 
     class _Stalling:
@@ -1598,7 +1607,7 @@ def test_a_timed_out_fetch_closes_its_response(
             return None
 
     monkeypatch.setattr(
-        responses,
+        fetch,
         "_opener",
         lambda *_: type("O", (), {"open": lambda *a, **k: _Stalling()})(),
     )
@@ -1654,7 +1663,7 @@ def test_a_sparse_member_is_not_treated_as_metadata() -> None:
     block, so bounding it would refuse a large member that extracts perfectly
     well. Grouping by "reads something" rather than by what the number means is
     how a guard like this acquires a false positive."""
-    assert tarfile.GNUTYPE_SPARSE not in responses._TAR_METADATA_TYPES
+    assert tarfile.GNUTYPE_SPARSE not in limits._TAR_METADATA_TYPES
 
 
 def test_a_long_path_carried_in_pax_metadata_still_extracts(tmp_path: Path) -> None:
@@ -1753,7 +1762,7 @@ def test_a_tar_parent_component_is_resolved_rather_than_removed(
     The end-to-end call is still made, for the one thing it can say portably: the
     outcome stays inside the error contract either way.
     """
-    responses._check_member_collisions(["a/../b.txt", "a/b.txt"], container="tar")
+    names._check_member_collisions(["a/../b.txt", "a/b.txt"], container="tar")
 
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
@@ -1831,7 +1840,7 @@ def test_the_zip64_end_record_is_not_mistaken_for_a_prepended_stub() -> None:
         ("zip64", zip64),
         ("zip64 + stub", stub + zip64),
     ):
-        assert responses._counted_zip_entries(data, 100) == 41, label
+        assert zips._counted_zip_entries(data, 100) == 41, label
 
 
 def test_a_zip64_self_extracting_archive_cannot_bypass_the_quota(
@@ -1840,7 +1849,7 @@ def test_a_zip64_self_extracting_archive_cannot_bypass_the_quota(
     """The consequence of the above, which is the part that matters: returning
     None skipped the member cap, so the layout that defeated the arithmetic was
     also the layout that got past the limit."""
-    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 5)
     payload = b"MZ" + b"stub" * 500 + _zip64_archive(end_record=True)
     with pytest.raises(ResponseError, match="over"):
         extract(payload, tmp_path)
@@ -1854,7 +1863,7 @@ def test_the_recording_handler_publishes_the_connection_it_builds(
     are forwarded without this code having to know which of them this
     interpreter's handler passes."""
     sink: dict[str, object] = {}
-    handler = responses._RecordingHTTPHandler(sink)
+    handler = fetch._RecordingHTTPHandler(sink)
 
     class _Connection:
         def __init__(self, host: str, **kwargs: object) -> None:
@@ -1878,11 +1887,11 @@ def test_the_opener_records_connections_only_when_given_somewhere_to_put_them(
     """The recording handlers are opt-in, so every caller that does not need
     cancellation keeps the plain handler set -- which the handler-inventory test
     above is asserting about."""
-    plain = {type(h).__name__ for h in responses._opener().handlers}
+    plain = {type(h).__name__ for h in fetch._opener().handlers}
     assert "HTTPSHandler" in plain
     assert "_RecordingHTTPSHandler" not in plain
 
-    recording = {type(h).__name__ for h in responses._opener({}).handlers}
+    recording = {type(h).__name__ for h in fetch._opener({}).handlers}
     assert "_RecordingHTTPSHandler" in recording
     assert "_RecordingHTTPHandler" in recording
 
@@ -1915,8 +1924,8 @@ def test_the_deadline_cancels_a_stall_before_the_headers_arrive(
             release.wait(10)
             raise AssertionError("the stalled open should never complete")
 
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
-    monkeypatch.setattr(responses, "_opener", lambda sink=None: _Opener(sink))
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(fetch, "_opener", lambda sink=None: _Opener(sink))
     try:
         with pytest.raises(ResponseError, match="exceeded"):
             download("https://example.com/trickled-headers.tar")
@@ -1994,10 +2003,14 @@ def test_detection_does_not_read_metadata_the_bound_would_refuse(
 
 
 def test_there_is_one_place_that_opens_a_tar() -> None:
-    """The reason the bound missed detection was two call sites, so the invariant
-    worth asserting is that there is now one. A second `tarfile.open` would
-    reintroduce the whole finding rather than a variant of it."""
-    source = Path(responses.__file__).read_text(encoding="utf-8")
+    """The metadata bound is installed by an argument to `tarfile.open`, so it is a
+    property of the call rather than of the package. A second call site is how it
+    came to apply to extraction and not to detection, which makes "there is one"
+    the invariant worth asserting."""
+    source = "".join(
+        Path(module.__file__).read_text(encoding="utf-8")
+        for module in (archives, fetch, names, tarballs, zips)
+    )
     assert source.count("tarfile.open(") == 1, (
         "every tar must be opened through _open_tar, which installs the bound"
     )
@@ -2068,7 +2081,7 @@ def test_a_timed_out_fetch_really_releases_its_connection(
     same code passes on Windows regardless, so this is checked in the Linux
     matrix.
     """
-    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.4)
+    monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.4)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
