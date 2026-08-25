@@ -1823,3 +1823,81 @@ def test_a_successful_fetch_still_returns_its_body(
         responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Body()})()
     )
     assert download("https://example.com/ok.tar") == b"hello"
+
+
+# --- Round twenty-three: parent components, ZIP64, real cancellation ---------
+
+
+def test_parent_components_collide_with_their_canonical_form(tmp_path: Path) -> None:
+    """`zipfile` *removes* `..` components rather than resolving them, so
+    `a/../b.txt` and `a/b.txt` are one file. `within` cannot catch this: the
+    resolved path stays inside the destination, so it is a collision rather than an
+    escape.
+
+    Second round on this check, and the same mistake both times — comparing a
+    representation instead of what the filesystem will see.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a/../b.txt", "first")
+        archive.writestr("a/b.txt", "second")
+    with pytest.raises(ResponseError, match="case-insensitive"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_a_zip64_archive_is_still_counted() -> None:
+    """A ZIP64 archive puts its own end record and locator *between* the central
+    directory and the EOCD, so measuring the gap as a prepended stub shifted the
+    offset into the directory and the walk gave up — skipping the preflight on
+    exactly the large archives it exists for.
+
+    The directory start is now found by checking for the signature rather than
+    computed, so both layouts work.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", allowZip64=True) as archive:
+        for index in range(40):
+            archive.writestr(f"f{index}.txt", "")
+        info = zipfile.ZipInfo("big.bin")
+        with archive.open(info, "w", force_zip64=True) as handle:
+            handle.write(b"x")
+    assert responses._counted_zip_entries(buffer.getvalue(), 100) == 41
+
+
+def test_a_timed_out_fetch_closes_its_response(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marking the thread a daemon only stops an abandoned fetch holding the
+    *process* open — it goes on holding a socket and its accumulated chunks, so a
+    series of timed-out downloads would retain one apiece.
+
+    The response is closed on timeout, which makes the blocked read fail and
+    releases the connection immediately.
+    """
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+    closed: list[bool] = []
+
+    class _Stalling:
+        headers: dict[str, str] = {}
+
+        def read(self, size: int = -1) -> bytes:
+            time.sleep(5)
+            return b"x"
+
+        def close(self) -> None:
+            closed.append(True)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        responses,
+        "_opener",
+        lambda: type("O", (), {"open": lambda *a, **k: _Stalling()})(),
+    )
+    with pytest.raises(ResponseError, match="exceeded"):
+        download("https://example.com/stalled.tar")
+    assert closed, "the response was abandoned rather than closed"

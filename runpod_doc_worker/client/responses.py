@@ -211,7 +211,12 @@ def _check_member_collisions(names: list[str], *, container: str) -> None:
         parts = [
             part
             for part in name.replace("\\", "/").split("/")
-            if part not in ("", ".")
+            # `..` as well as `.`: zipfile *removes* parent components rather
+            # than resolving them, so `a/../b.txt` and `a/b.txt` are one file. The
+            # previous version dropped only `.`, and `within` cannot catch this
+            # because the resolved path stays inside the destination -- it is a
+            # collision, not an escape.
+            if part not in ("", ".", "..")
         ]
         folded = "/".join(parts).casefold()
         if not folded:
@@ -589,11 +594,15 @@ def _opener() -> urllib.request.OpenerDirector:
     return opener
 
 
-def _fetch(url: str) -> bytes:
+def _fetch(url: str, holder: dict[str, object]) -> bytes:
     """Open, read and return the body. Blocking; bounded by its caller."""
     with _opener().open(  # noqa: S310 - scheme checked, redirects checked
         url, timeout=DOWNLOAD_TIMEOUT_SECONDS
     ) as response:
+        # Published so the caller can close it on timeout. A daemon thread only
+        # stops holding the *process* open; it goes on holding a socket and its
+        # accumulated chunks, so repeated timed-out fetches would each retain one.
+        holder["response"] = response
         declared = response.headers.get("Content-Length")
         if declared and declared.isdigit() and int(declared) > MAX_ARCHIVE_BYTES:
             raise ResponseError(
@@ -639,15 +648,17 @@ def download(url: str) -> bytes:
     blocking call returns cannot bound that call -- the only way to bound it from
     here is to stop waiting on it.
 
-    The thread is a daemon, so an abandoned fetch cannot keep the process alive;
-    it ends on its own when the socket timeout fires.
+    On timeout the response is closed, which makes the blocked read fail and
+    releases the socket immediately. Marking the thread a daemon was not enough on
+    its own: that only stops an abandoned fetch holding the *process* open, while
+    it goes on holding a connection and its accumulated chunks.
     """
     require_fetchable_url(url)
     outcome: dict[str, object] = {}
 
     def run() -> None:
         try:
-            outcome["body"] = _fetch(url)
+            outcome["body"] = _fetch(url, outcome)
         except BaseException as error:  # noqa: BLE001 - re-raised on the caller
             outcome["error"] = error
 
@@ -655,6 +666,19 @@ def download(url: str) -> bytes:
     worker.start()
     worker.join(DOWNLOAD_DEADLINE_SECONDS)
     if worker.is_alive():
+        # Close the response so the blocked read fails and the socket is released
+        # now rather than whenever the idle timeout happens to fire. Without this
+        # the deadline bounded only the *caller*: the fetch carried on reading, and
+        # a series of timed-out downloads accumulated a thread, a connection and a
+        # growing chunk list apiece.
+        response = outcome.get("response")
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - already abandoning this fetch
+                pass
+        worker.join(1.0)
         raise ResponseError(
             f"fetching the archive exceeded {DOWNLOAD_DEADLINE_SECONDS:.0f}s"
         )
@@ -862,14 +886,29 @@ def _counted_zip_entries(data: bytes, limit: int) -> int | None:
     # `ZipFile` corrects for that by measuring the discrepancy; using the raw
     # offset landed in the stub, the scan gave up and returned None, and the
     # preflight it was meant to perform was skipped entirely.
+    # A self-extracting zip prepends a stub, and the EOCD offsets are relative to
+    # the embedded archive -- but a ZIP64 archive also puts its own end record and
+    # locator *between* the directory and the EOCD, so the gap is not all stub.
+    # Measuring it as if it were shifted `offset` into the directory and the walk
+    # gave up, skipping the preflight on exactly the large archives it exists for.
+    #
+    # So the candidates are tried and checked instead of computed: the directory
+    # begins where a central-directory signature actually is.
     eocd_at = base + at
+    candidates = [offset]
     prepended = eocd_at - (offset + size)
-    if prepended < 0:
+    if prepended > 0:
+        candidates.append(offset + prepended)
+    offset = -1
+    for candidate in candidates:
+        if 0 <= candidate <= len(data) - 4 and data[candidate : candidate + 4] == (
+            b"PK\x01\x02"
+        ):
+            offset = candidate
+            break
+    if offset < 0 or size < 0 or offset + size > len(data):
         return None
-    offset += prepended
     end = offset + size
-    if offset < 0 or end > len(data) or size < 0:
-        return None
 
     count = 0
     cursor = offset
