@@ -83,6 +83,15 @@ _B64_ALPHABET = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # reports through OSError, which is already covered.
 _DECOMPRESSION_ERRORS = (zlib.error, lzma.LZMAError, EOFError)
 
+# Caps on what a response may expand to. `extract` reads the archive into memory,
+# so an unbounded body is a memory-exhaustion vector on its own, and a small
+# archive can still expand to an unbounded amount of disk. Deliberately generous:
+# these are backstops against a hostile or broken worker, not a policy on document
+# size. A caller needing more can raise them on the module.
+MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 100_000
+
 # Reserved on Windows with any extension, and `open()` on one succeeds while
 # discarding the data.
 _DOS_DEVICE_NAMES = frozenset(
@@ -124,33 +133,40 @@ def _device_stem(name: str) -> str:
 
 
 def _directory_mode(destination: Path) -> int:
-    """``0o777`` minus the process umask — what ``mkdir`` would have produced.
+    """The mode ``mkdir`` produces here and now, under the current umask.
 
-    The stdlib ``data`` filter expresses "leave it to the umask" by setting mode
-    to ``None`` so tarfile skips the chmod, and this fallback copied that. It was
-    exactly backwards: the ``if tarinfo.mode is None: return`` guard in
-    ``TarFile.chmod`` arrived *together with* filter support, so on the older
-    patch releases this fallback exists for, ``None`` reaches ``os.chmod`` and
-    raises ``TypeError``. The fix worked only on interpreters that never run it
-    and broke the ones that do.
+    Measured by creating a directory and looking at it, which is the only way to
+    learn this without touching process-global state. Two earlier versions were
+    each wrong in a different direction:
 
-    Taken from the destination directory rather than from the umask. Reading a
-    umask means setting it and setting it back, and that is process-global: another
-    thread creating a file in the window gets permissions as though the mask were
-    zero, and two concurrent extractions can interleave their swaps and leave the
-    process umask permanently changed. Two calls to this helper were enough on
-    their own — no caller had to be doing anything unusual.
+    * reading the umask means setting it to zero and setting it back, and that is
+      process-global - another thread creating a file inside that window gets
+      permissions as though no mask were set, and two concurrent extractions can
+      interleave their swaps and leave the umask permanently changed;
+    * copying the *destination's* mode is not the same as creating under the
+      umask. An existing ``0o700`` destination under umask ``022`` made every
+      extracted subdirectory ``0o700``, and a permissive existing destination
+      overrode a restrictive umask in the other direction.
 
-    The destination was created by ``extract`` moments earlier, so its mode is
-    already the umask applied to a new directory. Where it existed first, its
-    permissions are a better model for what goes inside it than the umask is
-    anyway. Falls back to ``0o755`` if it cannot be stat'd, which is the same
-    conservative value the very first version of this used.
+    A probe answers the question that is actually being asked. It is created
+    inside ``destination`` so it lands on the same filesystem, and removed
+    immediately. Falls back to ``0o755`` when it cannot be created, which is the
+    conservative value the first version of this used.
     """
+    probe = destination / ".runpod-doc-worker-mode-probe"
     try:
-        return destination.stat().st_mode & 0o777
+        probe.mkdir()
     except OSError:
         return 0o755
+    try:
+        return probe.stat().st_mode & 0o777
+    except OSError:
+        return 0o755
+    finally:
+        try:
+            probe.rmdir()
+        except OSError:
+            pass
 
 
 def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> None:
@@ -464,10 +480,45 @@ def download(url: str) -> bytes:
     """
     require_fetchable_url(url)
     try:
-        with _opener().open(  # noqa: S310 — scheme checked, redirects checked
+        with _opener().open(  # noqa: S310 - scheme checked, redirects checked
             url, timeout=DOWNLOAD_TIMEOUT_SECONDS
         ) as response:
-            return response.read()
+            # Read in bounded chunks rather than `response.read()`. The socket
+            # timeout only bounds *idle* time, so a peer that keeps sending can
+            # hold the connection open indefinitely and grow this buffer without
+            # ever tripping it. The declared Content-Length is not trusted for
+            # this - it is checked as an early exit, but the running total is what
+            # actually stops the read.
+            declared = response.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > MAX_ARCHIVE_BYTES:
+                raise ResponseError(
+                    f"the archive is {int(declared)} bytes, over the "
+                    f"{MAX_ARCHIVE_BYTES}-byte limit"
+                )
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_ARCHIVE_BYTES:
+                    raise ResponseError(
+                        f"the archive exceeds the {MAX_ARCHIVE_BYTES}-byte limit"
+                    )
+                chunks.append(chunk)
+            # Reading in chunks loses the truncation check that `read()` performs
+            # for free: `read(n)` returns what has arrived and then returns b"" at
+            # EOF, so a server that hangs up early yields a short body instead of
+            # `IncompleteRead`. Bounding the read silently disabled the detection
+            # of a truncated one, which an existing test caught. Compared against
+            # the declared length here instead.
+            if declared and declared.isdigit() and total < int(declared):
+                raise ResponseError(
+                    f"fetching the archive failed: IncompleteRead "
+                    f"({total} bytes read, {int(declared) - total} more expected)"
+                )
+            return b"".join(chunks)
     except urllib.error.HTTPError as e:
         raise ResponseError(f"fetching the archive failed: HTTP {e.code}") from e
     except urllib.error.URLError as e:
@@ -625,6 +676,21 @@ def _extract_zip(data: bytes, destination: Path) -> None:
         raise ResponseError(f"the archive could not be read: {e}") from e
 
     with zip_file as archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_ARCHIVE_MEMBERS:
+            raise ResponseError(
+                f"the archive declares {len(infos)} members, over the "
+                f"{MAX_ARCHIVE_MEMBERS} limit"
+            )
+        # Checked before writing anything. A small archive can declare an enormous
+        # expansion - the classic decompression bomb - and the download cap says
+        # nothing about it, because what that bounded was the *compressed* form.
+        declared = sum(info.file_size for info in infos)
+        if declared > MAX_EXTRACTED_BYTES:
+            raise ResponseError(
+                f"the archive expands to {declared} bytes, over the "
+                f"{MAX_EXTRACTED_BYTES}-byte limit"
+            )
         for name in archive.namelist():
             if not within(destination, name):
                 raise ResponseError(
@@ -686,7 +752,7 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
         raise ResponseError(f"the archive payload could not be read: {e}") from e
     try:
         destination = Path(dest_dir).resolve()
-    except (TypeError, ValueError, OSError) as e:
+    except (TypeError, ValueError, OSError, RuntimeError) as e:
         # Resolution happens before the guarded creation below, so it was outside
         # the contract: a NUL in the path raises ValueError, and a non-path
         # `dest_dir` raises TypeError from `Path()` itself.
@@ -698,6 +764,10 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
         # `resolve()` and is rejected here as
         # `ValueError: embedded null character in path`. Guarding the resolve
         # alone left this one escaping, which the reproduction caught.
+        # RuntimeError is a symlink loop, which `within` already handled and this
+        # did not - the same call, two guards, one of them narrower. A destination
+        # reused across extractions is exactly where such a link accumulates.
+        #
         # `dest_dir` naming an existing regular file, or a parent that cannot be
         # written, raises before either archive helper runs — so the failure fell
         # outside the contract even though it happened inside the public call.
@@ -716,6 +786,25 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     # this believing it was where the corrupted-offset ValueError came from. It is
     # not: that one surfaces from `extractall` opening a member, and the fix for it
     # is in `_extract_zip`. Tracing beat guessing, and the guess looked right.
+    # Tar first. `is_zipfile` looks for an end-of-central-directory record near the
+    # *end* of the data and tolerates arbitrary bytes before it - that is how a
+    # self-extracting zip works - so it answers "is there a zip in here
+    # somewhere", not "is this a zip". A tar carrying a `nested.zip` member
+    # therefore said True, the whole tar was read as a zip, and extraction
+    # succeeded while returning only the nested archive's entries and silently
+    # dropping every real member. A wrong answer with no error, which is the worst
+    # shape available here.
+    #
+    # `is_tarfile` reads the header magic at a fixed offset, so it has no such
+    # ambiguity and can decide first.
+    try:
+        looks_like_tar = tarfile.is_tarfile(io.BytesIO(data))
+    except (ValueError, OSError, tarfile.TarError, *_DECOMPRESSION_ERRORS) as e:
+        raise ResponseError(f"the archive could not be read: {e}") from e
+    if looks_like_tar:
+        _extract_tar(data, destination)
+        return destination
+
     try:
         looks_like_zip = zipfile.is_zipfile(io.BytesIO(data))
     except (ValueError, OSError, zipfile.BadZipFile) as e:
@@ -723,5 +812,7 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     if looks_like_zip:
         _extract_zip(data, destination)
     else:
+        # Neither container. Reported through the tar reader so the message keeps
+        # naming what is actually wrong with the bytes.
         _extract_tar(data, destination)
     return destination

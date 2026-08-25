@@ -852,17 +852,19 @@ def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
 
     directories = [m for m in seen if m.isdir()]
     assert directories, "the fallback path did not run"
-    # The destination's own mode, not a umask computation. This asserted
-    # `0o777 & ~umask` for one round and passed on Windows only by coincidence —
-    # there tmp_path is 0o777 and the umask is 0, so both sides were 0o777. On
-    # Linux tmp_path is 0o700 while the umask says 0o755, and CI failed on all
-    # three interpreters. The helper stopped reading the umask precisely because
-    # doing so is a process-global race, so a umask-derived expectation now
-    # describes an implementation that no longer exists.
-    expected = tmp_path.stat().st_mode & 0o777
+    # What `mkdir` produces here and now, which is neither the umask arithmetic
+    # this asserted two rounds ago nor the destination's own mode it asserted one
+    # round ago. Both were wrong in opposite directions: the umask version ignored
+    # that reading a umask is a process-global race, and the destination version
+    # made an existing 0o700 destination force 0o700 on every extracted
+    # subdirectory. A reference directory answers it without either flaw.
+    reference = tmp_path / "reference-for-mode"
+    reference.mkdir()
+    expected = reference.stat().st_mode & 0o777
+    reference.rmdir()
     for member in directories:
         assert member.mode == expected, (
-            "the directory mode should follow the destination it is created in"
+            "the directory mode should be what mkdir produces under this umask"
         )
         # Not None. This assertion said `is None` for one round, copying what the
         # `data` filter does — but the `mode is None` guard in TarFile.chmod
@@ -1209,3 +1211,153 @@ def test_ownership_uses_the_do_not_change_sentinel() -> None:
     assert (member.uname, member.gname) == ("", ""), (
         "empty names keep chown's name lookup from overriding the numeric values"
     )
+
+
+# --- Round sixteen: container detection, bounds, and the mode probe ----------
+
+
+def test_a_tar_containing_a_zip_is_extracted_as_a_tar(tmp_path: Path) -> None:
+    """The P1, and the worst-shaped bug in this module so far: a wrong answer
+    with no error at all.
+
+    `is_zipfile` looks for an end-of-central-directory record near the end of the
+    data and tolerates arbitrary bytes before it, which is how a self-extracting
+    zip works. So it answers "is there a zip in here somewhere", not "is this a
+    zip". A tar carrying a `nested.zip` member said True, the whole tar was read
+    as a zip, and extraction succeeded while returning only the nested archive's
+    entries and dropping every real member.
+    """
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as nested:
+        nested.writestr("nested-only.txt", "i am inside the nested zip")
+
+    outer = io.BytesIO()
+    with tarfile.open(fileobj=outer, mode="w") as tar:
+        for name, body in (("doc.md", b"# the real document"), ("nested.zip", inner.getvalue())):
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+
+    assert zipfile.is_zipfile(io.BytesIO(outer.getvalue())), (
+        "the premise: is_zipfile still says yes, which is why tar has to be asked first"
+    )
+    extract(outer.getvalue(), tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.md", "nested.zip"]
+
+
+def test_a_real_zip_is_still_extracted_as_a_zip(tmp_path: Path) -> None:
+    """Asking tar first must not cost the zip path."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "# hello")
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "# hello"
+
+
+def test_an_empty_zip_is_still_recognised(tmp_path: Path) -> None:
+    """An empty zip is EOCD-only and is not a tar, so it must fall through."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w"):
+        pass
+    extract(buffer.getvalue(), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_oversized_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The socket timeout bounds idle time, not total volume, so a peer that keeps
+    sending holds the connection and grows the buffer without ever tripping it."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_BYTES", 4096)
+
+    class _Endless:
+        headers: dict[str, str] = {}
+
+        def read(self, size: int = -1) -> bytes:
+            return b"x" * (size if size and size > 0 else 1024)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Endless()})())
+    with pytest.raises(ResponseError, match="limit"):
+        download("https://example.com/endless.tar")
+
+
+def test_a_declared_oversize_is_refused_before_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An early exit on Content-Length, which is a courtesy rather than the
+    protection - the running total is what actually stops an untruthful one."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_BYTES", 4096)
+
+    class _Declared:
+        headers = {"Content-Length": "999999999"}
+
+        def read(self, size: int = -1) -> bytes:
+            raise AssertionError("must not read a body it already refused")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Declared()})())
+    with pytest.raises(ResponseError, match="over the"):
+        download("https://example.com/huge.tar")
+
+
+def test_a_zip_declaring_a_huge_expansion_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decompression bomb: small compressed, enormous expanded. The download cap
+    says nothing about it, because what that bounds is the compressed form."""
+    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 1024)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("bomb.txt", "0" * 100_000)
+    assert len(buffer.getvalue()) < 1024, "the archive itself must be small"
+    with pytest.raises(ResponseError, match="expands to"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_a_zip_declaring_too_many_members_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 3)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(5):
+            archive.writestr(f"f{index}.txt", "x")
+    with pytest.raises(ResponseError, match="members"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_the_directory_mode_is_what_mkdir_actually_produces(tmp_path: Path) -> None:
+    """Not the destination's own mode, which was the previous version.
+
+    An existing 0o700 destination under umask 022 made every extracted
+    subdirectory 0o700; a permissive destination overrode a restrictive umask the
+    other way. A probe measures what mkdir does here and now.
+    """
+    restrictive = tmp_path / "restrictive"
+    restrictive.mkdir(mode=0o700)
+
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    expected = reference.stat().st_mode & 0o777
+
+    assert responses._directory_mode(restrictive) == expected
+    assert not list(restrictive.iterdir()), "the probe must clean up after itself"
+
+
+def test_a_destination_that_is_a_symlink_loop_is_refused(tmp_path: Path) -> None:
+    """`extract`'s resolve guard omitted RuntimeError while `within` had it - the
+    same call, two guards, one narrower."""
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    with pytest.raises(ResponseError):
+        extract(b"junk", loop)
