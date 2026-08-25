@@ -185,7 +185,7 @@ def test_a_fetch_failure_is_refused(monkeypatch: pytest.MonkeyPatch, raised) -> 
         def open(self, *args: object, **kwargs: object):
             raise raised
 
-    monkeypatch.setattr(responses, "_opener", lambda: _Exploding())
+    monkeypatch.setattr(responses, "_opener", lambda *_: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -695,7 +695,7 @@ def test_a_malformed_redirect_target_is_refused(monkeypatch: pytest.MonkeyPatch)
         def open(self, *args: object, **kwargs: object):
             raise ValueError("Invalid IPv6 URL")
 
-    monkeypatch.setattr(responses, "_opener", lambda: _Exploding())
+    monkeypatch.setattr(responses, "_opener", lambda *_: _Exploding())
     with pytest.raises(ResponseError, match="fetching the archive failed"):
         download("https://example.com/out.tar.gz")
 
@@ -1281,7 +1281,7 @@ def test_an_oversized_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> No
         def __exit__(self, *exc: object) -> None:
             return None
 
-    monkeypatch.setattr(responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Endless()})())
+    monkeypatch.setattr(responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Endless()})())
     with pytest.raises(ResponseError, match="limit"):
         download("https://example.com/endless.tar")
 
@@ -1303,7 +1303,7 @@ def test_a_declared_oversize_is_refused_before_reading(monkeypatch: pytest.Monke
         def __exit__(self, *exc: object) -> None:
             return None
 
-    monkeypatch.setattr(responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Declared()})())
+    monkeypatch.setattr(responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Declared()})())
     with pytest.raises(ResponseError, match="over the"):
         download("https://example.com/huge.tar")
 
@@ -1538,7 +1538,7 @@ def test_a_download_that_never_finishes_hits_the_deadline(
             return None
 
     monkeypatch.setattr(
-        responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Trickle()})()
+        responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Trickle()})()
     )
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/trickle.tar")
@@ -1574,7 +1574,7 @@ def test_the_deadline_covers_connection_and_headers(
 
             return _Empty()
 
-    monkeypatch.setattr(responses, "_opener", lambda: _SlowOpen())
+    monkeypatch.setattr(responses, "_opener", lambda *_: _SlowOpen())
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/slow.tar")
 
@@ -1664,7 +1664,7 @@ def test_members_colliding_under_case_folding_are_refused(
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(first, "first")
         archive.writestr(second, "second")
-    with pytest.raises(ResponseError, match="case-insensitive"):
+    with pytest.raises(ResponseError, match="same file"):
         extract(buffer.getvalue(), tmp_path)
 
 
@@ -1741,7 +1741,7 @@ def test_dot_components_collide_with_their_canonical_form(tmp_path: Path) -> Non
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("a/./b.txt", "first")
         archive.writestr("a/b.txt", "second")
-    with pytest.raises(ResponseError, match="case-insensitive"):
+    with pytest.raises(ResponseError, match="same file"):
         extract(buffer.getvalue(), tmp_path)
 
 
@@ -1789,7 +1789,7 @@ def test_the_deadline_bounds_a_blocking_open(monkeypatch: pytest.MonkeyPatch) ->
         def open(self, *args: object, **kwargs: object):
             time.sleep(30)
 
-    monkeypatch.setattr(responses, "_opener", lambda: _NeverReturns())
+    monkeypatch.setattr(responses, "_opener", lambda *_: _NeverReturns())
     started = time.monotonic()
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/blocked.tar")
@@ -1820,7 +1820,7 @@ def test_a_successful_fetch_still_returns_its_body(
             return None
 
     monkeypatch.setattr(
-        responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Body()})()
+        responses, "_opener", lambda *_: type("O", (), {"open": lambda *a, **k: _Body()})()
     )
     assert download("https://example.com/ok.tar") == b"hello"
 
@@ -1841,18 +1841,20 @@ def test_parent_components_collide_with_their_canonical_form(tmp_path: Path) -> 
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("a/../b.txt", "first")
         archive.writestr("a/b.txt", "second")
-    with pytest.raises(ResponseError, match="case-insensitive"):
+    with pytest.raises(ResponseError, match="same file"):
         extract(buffer.getvalue(), tmp_path)
 
 
 def test_a_zip64_archive_is_still_counted() -> None:
-    """A ZIP64 archive puts its own end record and locator *between* the central
-    directory and the EOCD, so measuring the gap as a prepended stub shifted the
-    offset into the directory and the walk gave up — skipping the preflight on
-    exactly the large archives it exists for.
+    """A member carrying a ZIP64 extra field in its directory record is counted.
 
-    The directory start is now found by checking for the signature rather than
-    computed, so both layouts work.
+    The docstring here used to claim this covered the ZIP64 *end record* layout.
+    It did not: `force_zip64=True` affects one member's directory record, while the
+    end record and locator are written only when the archive itself exceeds a
+    limit. So this asserts that the wider directory record does not throw the walk
+    off, which is worth having, and
+    `test_the_zip64_end_record_is_not_mistaken_for_a_prepended_stub` covers the
+    layout this one was named for.
     """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", allowZip64=True) as archive:
@@ -1896,8 +1898,210 @@ def test_a_timed_out_fetch_closes_its_response(
     monkeypatch.setattr(
         responses,
         "_opener",
-        lambda: type("O", (), {"open": lambda *a, **k: _Stalling()})(),
+        lambda *_: type("O", (), {"open": lambda *a, **k: _Stalling()})(),
     )
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/stalled.tar")
     assert closed, "the response was abandoned rather than closed"
+
+
+# --- Round twenty-four: container semantics, ZIP64 stubs, header stalls ------
+
+
+def test_a_tar_member_resolving_onto_another_is_a_collision(tmp_path: Path) -> None:
+    """`a/../b.txt` and `b.txt` are one file in a tar, and were not compared as one.
+
+    The canonical form was written for zip, which *removes* parent components --
+    so `a/../b.txt` folded to `a/b.txt`. A tar lets the filesystem resolve them,
+    which makes the same member land at `b.txt`, and the two names therefore
+    compared as different while the second overwrote the first. `within` cannot
+    catch it either: the path stays inside the destination, so this is a
+    collision and not an escape.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name in ("a/../b.txt", "b.txt"):
+            info = tarfile.TarInfo(name)
+            info.size = 0
+            tar.addfile(info, io.BytesIO(b""))
+    with pytest.raises(ResponseError, match="same file"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_a_tar_parent_component_is_resolved_rather_than_removed(
+    tmp_path: Path
+) -> None:
+    """The other half of the same rule, which a single canonical form gets wrong.
+
+    In a tar `a/../b.txt` lands at `b.txt`, so it does *not* collide with
+    `a/b.txt` -- and refusing that pair would reject an archive that extracts
+    perfectly well. Applying the tar rule to both containers would have swapped
+    one false negative for one false positive.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name in ("a/../b.txt", "a/b.txt"):
+            info = tarfile.TarInfo(name)
+            info.size = 0
+            tar.addfile(info, io.BytesIO(b""))
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / "b.txt").is_file()
+    assert (tmp_path / "a" / "b.txt").is_file()
+
+
+def test_a_zip_parent_component_is_removed_rather_than_resolved(
+    tmp_path: Path
+) -> None:
+    """And the zip half, which is the case the shared rule was written for."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a/../b.txt", "first")
+        archive.writestr("a/b.txt", "second")
+    with pytest.raises(ResponseError, match="same file"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def _zip64_archive(*, end_record: bool, entries: int = 41) -> bytes:
+    """An archive with a real ZIP64 end record, which needs forcing.
+
+    `force_zip64=True` on a member only puts a ZIP64 extra field in that member's
+    directory record. The end record and locator are written when the *archive*
+    exceeds a limit, so lowering the entry-count limit is what produces the layout
+    under test -- and the previous version of this test did not, so it described a
+    ZIP64 archive while building an ordinary one.
+    """
+    saved = zipfile.ZIP_FILECOUNT_LIMIT
+    if end_record:
+        zipfile.ZIP_FILECOUNT_LIMIT = 4
+    try:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", allowZip64=True) as archive:
+            for index in range(entries - 1):
+                archive.writestr(f"f{index}.txt", "")
+            with archive.open(
+                zipfile.ZipInfo("big.bin"), "w", force_zip64=True
+            ) as handle:
+                handle.write(b"x")
+        return buffer.getvalue()
+    finally:
+        zipfile.ZIP_FILECOUNT_LIMIT = saved
+
+
+def test_the_zip64_end_record_is_not_mistaken_for_a_prepended_stub() -> None:
+    """ZIP64 *and* a self-extracting stub together defeated both candidates.
+
+    The stub correction is the distance between the directory's end and the EOCD.
+    A ZIP64 archive puts its own end record and locator in that gap, so measuring
+    to the EOCD counted 76 extra bytes as stub. With either feature alone one of
+    the two candidates was right; with both, neither was, and the preflight was
+    skipped on exactly the large self-extracting archives it exists for.
+
+    Verified against the previous implementation, which returns None for the last
+    case here and the correct count for the other three.
+    """
+    stub = b"MZ" + b"stub" * 500
+    plain = _zip64_archive(end_record=False)
+    zip64 = _zip64_archive(end_record=True)
+    assert b"PK\x06\x06" in zip64, "the fixture is not a ZIP64 archive"
+    assert b"PK\x06\x06" not in plain
+
+    for label, data in (
+        ("plain", plain),
+        ("plain + stub", stub + plain),
+        ("zip64", zip64),
+        ("zip64 + stub", stub + zip64),
+    ):
+        assert responses._counted_zip_entries(data, 100) == 41, label
+
+
+def test_a_zip64_self_extracting_archive_cannot_bypass_the_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The consequence of the above, which is the part that matters: returning
+    None skipped the member cap, so the layout that defeated the arithmetic was
+    also the layout that got past the limit."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    payload = b"MZ" + b"stub" * 500 + _zip64_archive(end_record=True)
+    with pytest.raises(ResponseError, match="over"):
+        extract(payload, tmp_path)
+
+
+def test_the_recording_handler_publishes_the_connection_it_builds(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection is captured where urllib creates it, keyword arguments and
+    all -- `do_open` rather than `http_open`, so `context` and `check_hostname`
+    are forwarded without this code having to know which of them this
+    interpreter's handler passes."""
+    sink: dict[str, object] = {}
+    handler = responses._RecordingHTTPHandler(sink)
+
+    class _Connection:
+        def __init__(self, host: str, **kwargs: object) -> None:
+            self.host = host
+            self.kwargs = kwargs
+
+    def fake_do_open(self, http_class, req, **kwargs):
+        # What AbstractHTTPHandler does with the factory it is handed.
+        return http_class("example.com", timeout=7, **kwargs)
+
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", fake_do_open)
+
+    built = handler.do_open(_Connection, object(), context="ctx")
+    assert sink["connection"] is built
+    assert built.host == "example.com"
+    assert built.kwargs == {"timeout": 7, "context": "ctx"}
+
+
+def test_the_opener_records_connections_only_when_given_somewhere_to_put_them(
+) -> None:
+    """The recording handlers are opt-in, so every caller that does not need
+    cancellation keeps the plain handler set -- which the handler-inventory test
+    above is asserting about."""
+    plain = {type(h).__name__ for h in responses._opener().handlers}
+    assert "HTTPSHandler" in plain
+    assert "_RecordingHTTPSHandler" not in plain
+
+    recording = {type(h).__name__ for h in responses._opener({}).handlers}
+    assert "_RecordingHTTPSHandler" in recording
+    assert "_RecordingHTTPHandler" in recording
+
+
+def test_the_deadline_cancels_a_stall_before_the_headers_arrive(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that trickles headers left the timeout with nothing to close.
+
+    `open()` had not returned, so no response had been published -- and the
+    previous fix closed only the response. The fetch went on holding the socket
+    until its own idle timeout, which is the state that fix was meant to end. The
+    connection exists well before the headers are parsed, so it is what gets
+    closed.
+    """
+    closed: list[str] = []
+    release = threading.Event()
+
+    class _Connection:
+        def close(self) -> None:
+            closed.append("connection")
+            release.set()
+
+    class _Opener:
+        def __init__(self, sink: dict[str, object]) -> None:
+            self._sink = sink
+
+        def open(self, *args: object, **kwargs: object) -> object:
+            self._sink["connection"] = _Connection()
+            release.wait(10)
+            raise AssertionError("the stalled open should never complete")
+
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(responses, "_opener", lambda sink=None: _Opener(sink))
+    try:
+        with pytest.raises(ResponseError, match="exceeded"):
+            download("https://example.com/trickled-headers.tar")
+        assert closed == ["connection"], (
+            "the header-phase stall was abandoned rather than cancelled"
+        )
+    finally:
+        release.set()

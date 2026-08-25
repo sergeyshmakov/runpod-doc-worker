@@ -188,6 +188,34 @@ def _windows_component_problem(part: str) -> str | None:
     return None
 
 
+def _canonical_member(name: str, *, container: str) -> str:
+    """The path the extractor will actually write, as a comparison key.
+
+    Container-specific, because the two containers resolve parent components
+    differently and one rule is wrong for one of them:
+
+    * zip -- ``zipfile`` *removes* ``..`` while extracting, so ``a/../b.txt``
+      lands at ``a/b.txt``;
+    * tar -- extraction lets the filesystem resolve it, so the same member lands
+      at ``b.txt``.
+
+    A zip-shaped rule applied to both meant a tar carrying ``a/../b.txt`` and
+    ``b.txt`` compared ``a/b.txt`` against ``b.txt``, found no collision, and let
+    the second overwrite the first. Folding answers "same name"; this has to
+    answer "same file", and that depends on who does the extracting.
+    """
+    parts: list[str] = []
+    for part in name.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if container == "tar" and parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts).casefold()
+
+
 def _check_member_collisions(names: list[str], *, container: str) -> None:
     """Refuse an archive whose member paths collide on a case-insensitive volume.
 
@@ -203,31 +231,16 @@ def _check_member_collisions(names: list[str], *, container: str) -> None:
     """
     seen: dict[str, str] = {}
     for name in names:
-        # Canonicalised the way the extractor resolves it, not merely folded.
-        # `zipfile` drops `.` components while extracting, so `a/./b.txt` and
-        # `a/b.txt` are the same destination -- and comparing the raw strings said
-        # they differed, so the second silently overwrote the first. Folding
-        # answers "same name"; this has to answer "same file".
-        parts = [
-            part
-            for part in name.replace("\\", "/").split("/")
-            # `..` as well as `.`: zipfile *removes* parent components rather
-            # than resolving them, so `a/../b.txt` and `a/b.txt` are one file. The
-            # previous version dropped only `.`, and `within` cannot catch this
-            # because the resolved path stays inside the destination -- it is a
-            # collision, not an escape.
-            if part not in ("", ".", "..")
-        ]
-        folded = "/".join(parts).casefold()
-        if not folded:
+        key = _canonical_member(name, container=container)
+        if not key:
             continue
-        first = seen.get(folded)
+        first = seen.get(key)
         if first is not None and first != name:
             raise ResponseError(
                 f"refusing {container} members {first!r} and {name!r}: "
-                f"they are the same file on a case-insensitive volume"
+                f"they resolve to the same file"
             )
-        seen[folded] = name
+        seen[key] = name
 
 
 def _check_member_name(name: str, *, container: str) -> None:
@@ -566,7 +579,43 @@ class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _opener() -> urllib.request.OpenerDirector:
+class _ConnectionRecorder:
+    """Publishes each connection into a caller-supplied dict as it is created.
+
+    The deadline needs an object to close, and the response does not exist until
+    ``open()`` returns -- so a server that trickles *headers* left the timeout
+    with nothing to cancel and the fetch went on reading. The connection is
+    created well before the headers are parsed, and closing it makes the blocked
+    read fail at once.
+
+    ``do_open`` is the interception point rather than ``http_open``/``https_open``
+    because it is where the connection class is used, and it receives whatever
+    keyword arguments this interpreter's handler passes (``context``,
+    ``check_hostname``) without this code having to know them.
+    """
+
+    def __init__(self, sink: dict[str, object]) -> None:
+        super().__init__()
+        self._sink = sink
+
+    def do_open(self, http_class, req, **kwargs):  # noqa: ANN001, ANN003, ANN201
+        def build(host, **connection_args):  # noqa: ANN001, ANN003, ANN202
+            connection = http_class(host, **connection_args)
+            self._sink["connection"] = connection
+            return connection
+
+        return super().do_open(build, req, **kwargs)
+
+
+class _RecordingHTTPHandler(_ConnectionRecorder, urllib.request.HTTPHandler):
+    """``HTTPHandler``, publishing its connection as it is created."""
+
+
+class _RecordingHTTPSHandler(_ConnectionRecorder, urllib.request.HTTPSHandler):
+    """``HTTPSHandler``, publishing its connection as it is created."""
+
+
+def _opener(sink: dict[str, object] | None = None) -> urllib.request.OpenerDirector:
     """An opener that speaks only HTTP(S) and checks every redirect.
 
     Assembled from an empty ``OpenerDirector`` rather than with
@@ -583,8 +632,12 @@ def _opener() -> urllib.request.OpenerDirector:
     opener = urllib.request.OpenerDirector()
     for handler in (
         urllib.request.ProxyHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPSHandler(),
+        _RecordingHTTPHandler(sink)
+        if sink is not None
+        else urllib.request.HTTPHandler(),
+        _RecordingHTTPSHandler(sink)
+        if sink is not None
+        else urllib.request.HTTPSHandler(),
         urllib.request.HTTPErrorProcessor(),
         urllib.request.HTTPDefaultErrorHandler(),
         urllib.request.UnknownHandler(),
@@ -596,7 +649,7 @@ def _opener() -> urllib.request.OpenerDirector:
 
 def _fetch(url: str, holder: dict[str, object]) -> bytes:
     """Open, read and return the body. Blocking; bounded by its caller."""
-    with _opener().open(  # noqa: S310 - scheme checked, redirects checked
+    with _opener(holder).open(  # noqa: S310 - scheme checked, redirects checked
         url, timeout=DOWNLOAD_TIMEOUT_SECONDS
     ) as response:
         # Published so the caller can close it on timeout. A daemon thread only
@@ -671,13 +724,18 @@ def download(url: str) -> bytes:
         # the deadline bounded only the *caller*: the fetch carried on reading, and
         # a series of timed-out downloads accumulated a thread, a connection and a
         # growing chunk list apiece.
-        response = outcome.get("response")
-        close = getattr(response, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:  # noqa: BLE001 - already abandoning this fetch
-                pass
+        # Both, in this order. The response exists only once the headers have been
+        # read, so a timeout during the header phase has nothing but the
+        # connection to close -- closing only the response bounded the body phase
+        # and left the earlier one uncancellable.
+        for key in ("response", "connection"):
+            target = outcome.get(key)
+            close = getattr(target, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - already abandoning this fetch
+                    pass
         worker.join(1.0)
         raise ResponseError(
             f"fetching the archive exceeded {DOWNLOAD_DEADLINE_SECONDS:.0f}s"
@@ -881,22 +939,29 @@ def _counted_zip_entries(data: bytes, limit: int) -> int | None:
             return None
         size = int.from_bytes(tail[at64 + 40 : at64 + 48], "little")
         offset = int.from_bytes(tail[at64 + 48 : at64 + 56], "little")
-    # A self-extracting zip carries a stub before the archive, and the offsets in
-    # the EOCD are relative to the *embedded* archive rather than to the file.
-    # `ZipFile` corrects for that by measuring the discrepancy; using the raw
-    # offset landed in the stub, the scan gave up and returned None, and the
-    # preflight it was meant to perform was skipped entirely.
-    # A self-extracting zip prepends a stub, and the EOCD offsets are relative to
-    # the embedded archive -- but a ZIP64 archive also puts its own end record and
-    # locator *between* the directory and the EOCD, so the gap is not all stub.
-    # Measuring it as if it were shifted `offset` into the directory and the walk
-    # gave up, skipping the preflight on exactly the large archives it exists for.
+    # A self-extracting zip carries a stub before the archive and the EOCD offsets
+    # are relative to the *embedded* archive, so the discrepancy has to be measured
+    # and added -- but a ZIP64 archive puts its own end record and locator
+    # *between* the directory and the EOCD, so measuring as far as the EOCD counts
+    # those 76 bytes as stub. With either feature alone one candidate was right;
+    # with both, the correction was off by the ZIP64 records and neither candidate
+    # landed on the directory, so the walk gave up on exactly the large archives
+    # the preflight exists for.
     #
-    # So the candidates are tried and checked instead of computed: the directory
-    # begins where a central-directory signature actually is.
+    # So the measurement runs to where the directory actually ends -- the ZIP64
+    # end record if there is one, the EOCD otherwise -- and each candidate is then
+    # checked for a central-directory signature rather than trusted.
     eocd_at = base + at
+    directory_end = eocd_at
+    locator = tail.rfind(b"PK\x06\x07", 0, at)
+    if locator >= 0 and at - locator == 20:
+        directory_end = base + locator
+        zip64_at = tail.rfind(b"PK\x06\x06", 0, locator)
+        if zip64_at >= 0 and locator - zip64_at >= 56:
+            directory_end = base + zip64_at
+
     candidates = [offset]
-    prepended = eocd_at - (offset + size)
+    prepended = directory_end - (offset + size)
     if prepended > 0:
         candidates.append(offset + prepended)
     offset = -1
