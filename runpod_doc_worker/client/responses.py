@@ -42,6 +42,11 @@ import urllib.error
 import urllib.request
 import zipfile
 import zlib
+
+try:  # pragma: no cover - present from Python 3.14
+    from compression.zstd import ZstdError as _ZstdError
+except ImportError:  # pragma: no cover - earlier releases
+    _ZstdError = None
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -88,7 +93,17 @@ _B64_ALPHABET = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # stream in either container, `lzma.LZMAError` from a damaged xz tar, and
 # `EOFError` from one that ends mid-stream. bzip2 is absent on purpose — it
 # reports through OSError, which is already covered.
-_DECOMPRESSION_ERRORS = (zlib.error, lzma.LZMAError, EOFError)
+_DECOMPRESSION_ERRORS: tuple[type[BaseException], ...] = (
+    zlib.error,
+    lzma.LZMAError,
+    EOFError,
+)
+if _ZstdError is not None:  # pragma: no cover - 3.14 and later
+    # Zip method 93 is Zstandard, supported from 3.14. A malformed payload
+    # raises ZstdError, which is neither an OSError nor any of the above, so
+    # it escaped exactly the way zlib.error and LZMAError each did in turn.
+    # Added conditionally so the module keeps importing on earlier releases.
+    _DECOMPRESSION_ERRORS = (*_DECOMPRESSION_ERRORS, _ZstdError)
 
 # Caps on what a response may expand to. `extract` reads the archive into memory,
 # so an unbounded body is a memory-exhaustion vector on its own, and a small
@@ -170,6 +185,33 @@ def _windows_component_problem(part: str) -> str | None:
     if part[-1] in " .":
         return "has a trailing dot or space, which Windows strips"
     return None
+
+
+def _check_member_collisions(names: list[str], *, container: str) -> None:
+    """Refuse an archive whose member paths collide on a case-insensitive volume.
+
+    Windows and macOS default to case-insensitive, so ``Report.txt`` and
+    ``report.txt`` are one file there. Each name passes every per-name check --
+    they are both perfectly legal -- and then the second extraction overwrites the
+    first, silently, while the archive reports two members and extraction reports
+    success.
+
+    That is the same shape as the earlier collision finding, where Windows itself
+    rewrote two distinct names into one. Per-name validation cannot see either:
+    the problem is a relationship between names, so it needs a pass over the set.
+    """
+    seen: dict[str, str] = {}
+    for name in names:
+        folded = name.replace("\\", "/").casefold().rstrip("/")
+        if not folded:
+            continue
+        first = seen.get(folded)
+        if first is not None and first != name:
+            raise ResponseError(
+                f"refusing {container} members {first!r} and {name!r}: "
+                f"they are the same file on a case-insensitive volume"
+            )
+        seen[folded] = name
 
 
 def _check_member_name(name: str, *, container: str) -> None:
@@ -698,6 +740,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             # is why the fix was verified by reproduction rather than by reading.
             raise ResponseError(f"the archive could not be read: {e}") from e
 
+        _check_member_collisions([m.name for m in members], container="tar")
         for member in members:
             _check_member_name(member.name, container="tar")
             if not (member.isfile() or member.isdir()):
@@ -775,41 +818,59 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
-def _declared_zip_entries(data: bytes) -> int | None:
-    """Entry count from the end-of-central-directory record, or None if unreadable.
+def _counted_zip_entries(data: bytes, limit: int) -> int | None:
+    """Central-directory records, counted by walking them, capped at ``limit``.
 
-    Read before constructing ``ZipFile``, which parses the whole central directory
-    and materialises a ``ZipInfo`` per entry in ``filelist``. A zip declaring
-    millions of empty entries stays far below the download cap and exhausts memory
-    there -- surfacing as ``MemoryError`` rather than a refusal. This is the same
-    shape as the tar ``getmembers()`` finding, and the same mistake of fixing one
-    container and leaving the other, which is now twice in this review.
+    Not the count in the end-of-central-directory record. That field is a claim,
+    and ``ZipFile`` does not act on it: it walks the central directory for the
+    declared *byte size*, so an archive can carry a thousand entries while saying
+    one and still have every ``ZipInfo`` materialised. A preflight that trusts the
+    number is therefore no protection against the case it exists for -- which is
+    what the previous version of this did.
 
-    Returning None on anything unexpected is deliberate: this is a cheap
-    pre-filter, and ``ZipFile`` remains the authority on whether the archive is
-    readable at all.
+    Walking is bounded two ways: it stops as soon as the count exceeds ``limit``,
+    so a hostile archive costs a fixed amount of work, and it refuses to read
+    outside the declared directory. Returns None if the structure cannot be
+    followed, leaving ``ZipFile`` as the authority on readability.
     """
     tail = data[-(65_536 + 22):]
+    base = len(data) - len(tail)
     at = tail.rfind(b"PK\x05\x06")
     if at < 0 or len(tail) - at < 22:
         return None
-    count = int.from_bytes(tail[at + 10 : at + 12], "little")
-    if count != 0xFFFF:
-        return count
-    # ZIP64: the 16-bit field is saturated, so the real count is in the ZIP64
-    # end-of-central-directory record earlier in the tail.
-    at64 = tail.rfind(b"PK\x06\x06", 0, at)
-    if at64 < 0 or len(tail) - at64 < 56:
+    size = int.from_bytes(tail[at + 12 : at + 16], "little")
+    offset = int.from_bytes(tail[at + 16 : at + 20], "little")
+    if size == 0xFFFFFFFF or offset == 0xFFFFFFFF:
+        at64 = tail.rfind(b"PK\x06\x06", 0, at)
+        if at64 < 0 or len(tail) - at64 < 56:
+            return None
+        size = int.from_bytes(tail[at64 + 40 : at64 + 48], "little")
+        offset = int.from_bytes(tail[at64 + 48 : at64 + 56], "little")
+    end = offset + size
+    if offset < 0 or end > len(data) or size < 0:
         return None
-    return int.from_bytes(tail[at64 + 32 : at64 + 40], "little")
+
+    count = 0
+    cursor = offset
+    while cursor + 46 <= end:
+        if data[cursor : cursor + 4] != b"PK\x01\x02":
+            return None
+        name_len = int.from_bytes(data[cursor + 28 : cursor + 30], "little")
+        extra_len = int.from_bytes(data[cursor + 30 : cursor + 32], "little")
+        comment_len = int.from_bytes(data[cursor + 32 : cursor + 34], "little")
+        cursor += 46 + name_len + extra_len + comment_len
+        count += 1
+        if count > limit:
+            return count
+    _ = base
+    return count
 
 
 def _extract_zip(data: bytes, destination: Path) -> None:
-    declared_entries = _declared_zip_entries(data)
-    if declared_entries is not None and declared_entries > MAX_ARCHIVE_MEMBERS:
+    counted_entries = _counted_zip_entries(data, MAX_ARCHIVE_MEMBERS)
+    if counted_entries is not None and counted_entries > MAX_ARCHIVE_MEMBERS:
         raise ResponseError(
-            f"the archive declares {declared_entries} members, over the "
-            f"{MAX_ARCHIVE_MEMBERS} limit"
+            f"the archive contains over {MAX_ARCHIVE_MEMBERS} members"
         )
     try:
         zip_file = zipfile.ZipFile(io.BytesIO(data))
@@ -852,6 +913,7 @@ def _extract_zip(data: bytes, destination: Path) -> None:
                 f"the archive expands to {declared} bytes, over the "
                 f"{MAX_EXTRACTED_BYTES}-byte limit"
             )
+        _check_member_collisions(archive.namelist(), container="zip")
         for name in archive.namelist():
             _check_member_name(name, container="zip")
             if not within(destination, name):

@@ -1579,14 +1579,31 @@ def test_the_deadline_covers_connection_and_headers(
         download("https://example.com/slow.tar")
 
 
-def test_the_zip_entry_count_is_read_before_parsing(tmp_path: Path) -> None:
-    """The preflight reads the end-of-central-directory record directly, so a
-    hostile count is refused before `ZipFile` materialises a ZipInfo per entry."""
+def test_the_zip_entry_count_is_counted_not_trusted(tmp_path: Path) -> None:
+    """The preflight walks the central directory rather than reading the count
+    field, so a lying archive gains nothing.
+
+    The previous version trusted the end-of-central-directory number, which
+    `ZipFile` itself does not: it walks the directory for the declared byte size.
+    So an archive could say one entry, carry forty, and have all forty
+    materialised -- the preflight was no protection against the case it existed
+    for.
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         for index in range(40):
             archive.writestr(f"f{index}.txt", "")
-    assert responses._declared_zip_entries(buffer.getvalue()) == 40
+    honest = buffer.getvalue()
+    assert responses._counted_zip_entries(honest, 100) == 40
+
+    # Same archive, both EOCD count fields rewritten to claim one entry.
+    lying = bytearray(honest)
+    at = lying.rfind(b"PK\x05\x06")
+    lying[at + 8 : at + 10] = (1).to_bytes(2, "little")
+    lying[at + 10 : at + 12] = (1).to_bytes(2, "little")
+    assert responses._counted_zip_entries(bytes(lying), 100) == 40, (
+        "the count must come from the records, not the claim"
+    )
 
 
 def test_a_zip_declaring_too_many_entries_is_refused_before_parsing(
@@ -1613,7 +1630,7 @@ def test_the_preflight_declines_to_guess(tmp_path: Path) -> None:
     pre-filter and `ZipFile` stays the authority on readability. A body with no
     EOCD must not be refused *by the preflight* — it is refused, but as an
     unreadable archive."""
-    assert responses._declared_zip_entries(b"not an archive at all") is None
+    assert responses._counted_zip_entries(b"not an archive at all", 100) is None
     with pytest.raises(ResponseError, match="could not be read"):
         extract(b"PK\x03\x04 truncated", tmp_path)
 
@@ -1624,3 +1641,90 @@ def test_an_ordinary_zip_still_extracts_after_the_preflight(tmp_path: Path) -> N
         archive.writestr("doc.md", "# hello")
     extract(buffer.getvalue(), tmp_path)
     assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "# hello"
+
+
+# --- Round twenty: case collisions, a counted directory, zstd ----------------
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("Report.txt", "report.txt"), ("A/B.txt", "a/b.txt"), ("Doc.MD", "doc.md")],
+)
+def test_members_colliding_under_case_folding_are_refused(
+    first: str, second: str, tmp_path: Path
+) -> None:
+    """Windows and macOS default to case-insensitive, so these are one file there
+    and the second extraction silently overwrites the first.
+
+    Every per-name check passes — both names are perfectly legal — because the
+    problem is a *relationship* between names. Per-name validation cannot see it
+    at all, which is why this needs a pass over the set rather than another rule.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(first, "first")
+        archive.writestr(second, "second")
+    with pytest.raises(ResponseError, match="case-insensitive"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+@pytest.mark.filterwarnings("ignore:Duplicate name:UserWarning")
+def test_the_same_name_twice_is_not_a_collision(tmp_path: Path) -> None:
+    """A zip may legitimately carry the same name twice; that is a duplicate, not
+    a case collision, and `ZipFile` already has a warning for it. Refusing it here
+    would reject archives that work."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "first")
+        archive.writestr("doc.md", "second")
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / "doc.md").is_file()
+
+
+def test_a_lying_entry_count_does_not_bypass_the_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ZipFile` does not act on the EOCD count — it walks the directory for the
+    declared byte size — so an archive can say one entry and carry thirty, and a
+    preflight that trusted the number was no protection against the case it
+    existed for."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(30):
+            archive.writestr(f"f{index}.txt", "")
+    lying = bytearray(buffer.getvalue())
+    at = lying.rfind(b"PK\x05\x06")
+    lying[at + 8 : at + 10] = (1).to_bytes(2, "little")
+    lying[at + 10 : at + 12] = (1).to_bytes(2, "little")
+
+    with pytest.raises(ResponseError, match="over"):
+        extract(bytes(lying), tmp_path)
+
+
+def test_the_count_walk_is_bounded(tmp_path: Path) -> None:
+    """It stops as soon as the limit is passed, so a hostile archive costs a fixed
+    amount of work rather than one proportional to its member count."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(50):
+            archive.writestr(f"f{index}.txt", "")
+    assert responses._counted_zip_entries(buffer.getvalue(), 5) == 6
+
+
+def test_the_decompression_tuple_tracks_the_interpreter() -> None:
+    """Zip method 93 is Zstandard, supported from 3.14, and a malformed payload
+    raises ZstdError — neither an OSError nor any of the others, so it escaped the
+    way zlib.error and LZMAError each did in turn.
+
+    Asserted as a property of the running interpreter rather than a fixed list, so
+    the test says the same thing on every supported release.
+    """
+    names = {error.__name__ for error in responses._DECOMPRESSION_ERRORS}
+    assert {"error", "LZMAError", "EOFError"} <= names
+    try:
+        from compression.zstd import ZstdError  # noqa: F401
+    except ImportError:
+        assert "ZstdError" not in names
+    else:
+        assert "ZstdError" in names
