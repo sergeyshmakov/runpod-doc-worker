@@ -31,7 +31,6 @@ from pathlib import Path
 import pytest
 
 from runpod_doc_worker.client import responses
-from runpod_doc_worker.client.responses import _apply_data_filter_mode
 from runpod_doc_worker.client import (
     ResponseError,
     decode_b64,
@@ -586,53 +585,6 @@ def test_names_merely_starting_like_a_device_are_allowed(name: str) -> None:
     assert safe_output_name(name, what="a basename") == name
 
 
-@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
-def test_the_legacy_tar_fallback_strips_unsafe_modes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """On patch releases without `filter`, the fallback used to extract with full
-    trust.
-
-    The member checks reject links, special files and traversal, but say nothing
-    about permissions — so an unfiltered extractall honoured setuid, setgid and
-    world-writable bits and the archive's own uid/gid. A crafted response could
-    drop a setuid binary, especially with a client running as root.
-
-    Forced here by making `filter="data"` raise TypeError the way an old
-    interpreter would, since the one running this suite supports it.
-    """
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as tar:
-        info = tarfile.TarInfo("payload.sh")
-        info.size = 0
-        info.mode = 0o4777
-        info.uid, info.gid = 1234, 5678
-        info.uname, info.gname = "attacker", "attacker"
-        tar.addfile(info, io.BytesIO(b""))
-
-    seen: list[tarfile.TarInfo] = []
-    real_extractall = tarfile.TarFile.extractall
-
-    def fake_extractall(self, path=None, members=None, **kwargs):
-        if "filter" in kwargs:
-            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
-        seen.extend(members or [])
-        return real_extractall(self, path, members)
-
-    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
-    extract(buffer.getvalue(), tmp_path)
-
-    assert seen, "the fallback path did not run"
-    for member in seen:
-        assert not member.mode & 0o7000, f"{member.name} kept a setuid/setgid/sticky bit"
-        assert not member.mode & 0o022, f"{member.name} stayed group/other-writable"
-        assert (member.uid, member.gid) == (-1, -1), (
-            "archive-supplied ownership survived; -1 is os.chown's "
-            "do-not-change, and 0 would mean root"
-        )
-        assert (member.uname, member.gname) == ("", "")
-
-
 # --- Round eight: the name collision, and destination resolution -------------
 
 
@@ -711,58 +663,6 @@ def test_a_strided_memoryview_is_handled(payload: object, tmp_path: Path) -> Non
         extract(payload, tmp_path)  # type: ignore[arg-type]
 
 
-@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
-def test_the_legacy_tar_fallback_leaves_usable_modes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Clearing the dangerous bits is only half of what `filter="data"` does.
-
-    It also makes the result usable: a regular file gets owner read/write and an
-    archived directory mode is ignored in favour of something traversable. The
-    previous fix only removed bits, so a member stored as mode 000 extracted as
-    000 and the client was handed a file it could not open while the job looked
-    like a success.
-    """
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as tar:
-        locked = tarfile.TarInfo("locked.txt")
-        locked.size = 0
-        locked.mode = 0o000
-        tar.addfile(locked, io.BytesIO(b""))
-        folder = tarfile.TarInfo("sub")
-        folder.type = tarfile.DIRTYPE
-        folder.mode = 0o000
-        tar.addfile(folder)
-
-    seen: list[tarfile.TarInfo] = []
-    real_extractall = tarfile.TarFile.extractall
-
-    def fake_extractall(self, path=None, members=None, **kwargs):
-        if "filter" in kwargs:
-            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
-        seen.extend(members or [])
-        return real_extractall(self, path, members)
-
-    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
-    extract(buffer.getvalue(), tmp_path)
-
-    assert seen, "the fallback path did not run"
-    by_name = {member.name: member for member in seen}
-    assert by_name["locked.txt"].mode & 0o600 == 0o600, "the file is unreadable"
-    # A directory's mode is left as None so creation honours the umask, which is
-    # what the `data` filter does — this assertion said 0o755 until a review
-    # pointed out that hard-coding it overrides the caller's umask.
-    assert by_name["sub"].mode is not None, "None breaks the legacy tarfile"
-    # Scoped to files. A directory's mode is `0o777 & ~umask`, which under umask 0
-    # is world-writable — and correctly so: that is what `mkdir` produces, and it
-    # is what `filter="data"` leaves behind by skipping the chmod entirely. The
-    # unsafe-bits rule exists to stop the *archive* dictating permissions, not to
-    # override the operator's umask.
-    for member in seen:
-        if not member.isdir():
-            assert not member.mode & 0o7022, "an unsafe bit survived on a file"
-
-
 # --- Round ten: redirect schemes, within(), umask, Windows characters --------
 
 
@@ -822,57 +722,6 @@ def test_the_opener_offers_only_http_handlers() -> None:
     names = {type(h).__name__ for h in _opener().handlers}
     assert "FTPHandler" not in names
     assert "FileHandler" not in names
-
-
-@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
-def test_the_legacy_fallback_leaves_directory_mode_to_the_umask(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The `data` filter sets directory mode to None so creation honours the
-    process umask. Hard-coding 0o755 made an archive directory world-traversable
-    for a client running under umask 077 — replicating the shape of the filter's
-    behaviour and not its point."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as tar:
-        folder = tarfile.TarInfo("sub")
-        folder.type = tarfile.DIRTYPE
-        folder.mode = 0o777
-        tar.addfile(folder)
-
-    seen: list[tarfile.TarInfo] = []
-    real_extractall = tarfile.TarFile.extractall
-
-    def fake_extractall(self, path=None, members=None, **kwargs):
-        if "filter" in kwargs:
-            raise TypeError("no filter on this release")
-        seen.extend(members or [])
-        return real_extractall(self, path, members)
-
-    monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
-    extract(buffer.getvalue(), tmp_path)
-
-    directories = [m for m in seen if m.isdir()]
-    assert directories, "the fallback path did not run"
-    # What `mkdir` produces here and now, which is neither the umask arithmetic
-    # this asserted two rounds ago nor the destination's own mode it asserted one
-    # round ago. Both were wrong in opposite directions: the umask version ignored
-    # that reading a umask is a process-global race, and the destination version
-    # made an existing 0o700 destination force 0o700 on every extracted
-    # subdirectory. A reference directory answers it without either flaw.
-    reference = tmp_path / "reference-for-mode"
-    reference.mkdir()
-    expected = reference.stat().st_mode & 0o777
-    reference.rmdir()
-    for member in directories:
-        assert member.mode == expected, (
-            "the directory mode should be what mkdir produces under this umask"
-        )
-        # Not None. This assertion said `is None` for one round, copying what the
-        # `data` filter does — but the `mode is None` guard in TarFile.chmod
-        # arrived together with filter support, so on the older releases this
-        # fallback exists for, None reaches os.chmod and raises TypeError. The
-        # fix worked only where it never runs.
-        assert member.mode is not None, "None is unusable on the legacy tarfile"
 
 
 # --- Round twelve: zip names, symlink loops, name length ---------------------
@@ -1036,58 +885,6 @@ def test_encodable_names_still_pass(name: str) -> None:
 # --- Round fourteen: the data filter's real rules, and timestamps ------------
 
 
-@pytest.mark.parametrize(
-    "archived",
-    [0o001, 0o007, 0o100, 0o755, 0o4777, 0o000, 0o644, 0o777, 0o2751],
-)
-def test_the_mode_rules_match_the_stdlib_data_filter(archived: int) -> None:
-    """Compared against the stdlib's own arithmetic rather than against expected
-    constants, because this is the fifth revision of this code and the first four
-    each replicated part of the filter and missed part.
-
-    The conditional this round added is the one missing from all of them: every
-    execute bit is cleared when owner-execute was not set, so `0o001` becomes
-    `0o600`. Masking and then OR-ing owner read/write left it `0o601` — still
-    executable by others, from an untrusted archive.
-    """
-    member = tarfile.TarInfo("f")
-    member.size = 0
-    member.mode = archived
-    member.type = tarfile.REGTYPE
-    _apply_data_filter_mode(member, 0o755)
-
-    expected = archived & 0o755
-    if not expected & 0o100:
-        expected &= ~0o111
-    expected |= 0o600
-    assert member.mode == expected
-
-
-def test_archive_supplied_ownership_is_discarded() -> None:
-    member = tarfile.TarInfo("f")
-    member.size = 0
-    member.mode = 0o644
-    member.uid, member.gid = 1234, 5678
-    member.uname, member.gname = "attacker", "attacker"
-    _apply_data_filter_mode(member, 0o755)
-    # -1, not 0. This asserted 0 for two rounds, which was the bug: 0 means
-    # *root*, so a root client extracting into a setgid or shared destination
-    # replaced the inherited group. The filter uses None for "leave it alone";
-    # -1 is the same intent in a form the legacy tarfile can also pass through.
-    assert (member.uid, member.gid) == (-1, -1)
-    assert (member.uname, member.gname) == ("", "")
-
-
-def test_a_directory_gets_the_umask_mode_not_the_archived_one() -> None:
-    """The filter sets None; the legacy tarfile this fallback exists for passes
-    None to os.chmod. An int is the same outcome by a route it can take."""
-    member = tarfile.TarInfo("d")
-    member.type = tarfile.DIRTYPE
-    member.mode = 0o000
-    _apply_data_filter_mode(member, 0o750)
-    assert member.mode == 0o750
-
-
 @pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
 def test_an_unusable_timestamp_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1151,67 +948,11 @@ def test_names_merely_containing_a_device_name_still_pass(name: str) -> None:
     assert safe_output_name(name, what="a basename") == name
 
 
-def test_reading_the_directory_mode_does_not_touch_the_process_umask(
-    tmp_path: Path,
-) -> None:
-    """The previous version read the umask by setting it to zero and setting it
-    back, which is process-global.
-
-    Another thread creating a file inside that window gets permissions as though
-    no mask were set, and two concurrent extractions can interleave their swaps
-    and leave the process umask permanently changed — two calls to this helper
-    were enough on their own. The mode now comes from the destination, which
-    ``extract`` created moments earlier and which therefore already has the umask
-    applied.
-    """
-    before = os.umask(0o022)
-    os.umask(before)
-
-    mode = responses._directory_mode(tmp_path)
-
-    after = os.umask(0o022)
-    os.umask(after)
-    assert before == after, "the helper mutated the process umask"
-    assert 0 < mode <= 0o777
-
-
-def test_the_directory_mode_falls_back_when_the_destination_is_gone(
-    tmp_path: Path,
-) -> None:
-    """It is called during extraction, so a destination that vanished should give
-    a conservative default rather than raise."""
-    missing = tmp_path / "not-there"
-    assert responses._directory_mode(missing) == 0o755
-
-
 def test_the_module_no_longer_touches_the_umask() -> None:
     """Structural, because the race is invisible in a single-threaded test: the
     only safe amount of `os.umask` in this module is none."""
     source = Path(responses.__file__).read_text(encoding="utf-8")
     assert "os.umask" not in source
-
-
-def test_ownership_uses_the_do_not_change_sentinel() -> None:
-    """`-1` is os.chown's own "leave it alone". Zero was wrong in a way that only
-    shows for a root client: it means *root*, so extracting into a setgid or
-    shared destination replaced the inherited group and could make the artifacts
-    unreachable for the people meant to read them.
-
-    The filter expresses this as None, and modern TarFile.chown turns None into
-    -1 itself — a guard that arrived with filter support, so passing None would
-    break the legacy interpreters this fallback exists for, exactly as it did for
-    mode. Copying the semantics rather than the literal is the lesson from that.
-    """
-    member = tarfile.TarInfo("f")
-    member.size = 0
-    member.mode = 0o644
-    member.uid, member.gid = 0, 0          # root, as an archive might claim
-    member.uname, member.gname = "root", "root"
-    _apply_data_filter_mode(member, 0o755)
-    assert (member.uid, member.gid) == (-1, -1)
-    assert (member.uname, member.gname) == ("", ""), (
-        "empty names keep chown's name lookup from overriding the numeric values"
-    )
 
 
 # --- Round sixteen: container detection, bounds, and the mode probe ----------
@@ -1334,24 +1075,6 @@ def test_a_zip_declaring_too_many_members_is_refused(
         extract(buffer.getvalue(), tmp_path)
 
 
-def test_the_directory_mode_is_what_mkdir_actually_produces(tmp_path: Path) -> None:
-    """Not the destination's own mode, which was the previous version.
-
-    An existing 0o700 destination under umask 022 made every extracted
-    subdirectory 0o700; a permissive destination overrode a restrictive umask the
-    other way. A probe measures what mkdir does here and now.
-    """
-    restrictive = tmp_path / "restrictive"
-    restrictive.mkdir(mode=0o700)
-
-    reference = tmp_path / "reference"
-    reference.mkdir()
-    expected = reference.stat().st_mode & 0o777
-
-    assert responses._directory_mode(restrictive) == expected
-    assert not list(restrictive.iterdir()), "the probe must clean up after itself"
-
-
 def test_a_destination_that_is_a_symlink_loop_is_refused(tmp_path: Path) -> None:
     """`extract`'s resolve guard omitted RuntimeError while `within` had it - the
     same call, two guards, one narrower."""
@@ -1431,28 +1154,6 @@ def test_ordinary_member_paths_still_extract(tmp_path: Path) -> None:
     extract(_tar_of(["doc.md", "images/fig.jpg"], size=4), tmp_path)
     assert (tmp_path / "doc.md").is_file()
     assert (tmp_path / "images" / "fig.jpg").is_file()
-
-
-def test_the_directory_mode_keeps_an_inherited_setgid_bit(tmp_path: Path) -> None:
-    """A setgid destination gives the probe an inherited 0o2000, and masking with
-    0o777 dropped it — so legacy tarfile applied a concrete mode that cleared
-    setgid from every extracted directory, and files created there afterwards
-    stopped inheriting the shared group.
-
-    Skipped where setgid is not a filesystem concept.
-    """
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    try:
-        shared.chmod(0o2775)
-    except (OSError, NotImplementedError):
-        pytest.skip("setgid is not supported here")
-    if not shared.stat().st_mode & 0o2000:
-        pytest.skip("the filesystem did not honour setgid")
-
-    mode = responses._directory_mode(shared)
-    assert mode & 0o2000, "the inherited setgid bit was discarded"
-    assert not list(shared.iterdir()), "the probe must clean up after itself"
 
 
 # --- Round eighteen: one filename rule, incremental quotas, a deadline -------
@@ -1906,6 +1607,45 @@ def test_a_timed_out_fetch_closes_its_response(
 
 
 # --- Round twenty-four: container semantics, ZIP64 stubs, header stalls ------
+
+
+def test_extraction_delegates_the_permission_rules_to_the_stdlib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`filter="data"` is passed, and nothing reimplements what it does.
+
+    This replaces nine tests that checked a hand-written copy of the filter's
+    permission rules, kept for interpreters older than 3.10.12. That copy was a
+    second implementation of security-relevant behaviour and produced six separate
+    review findings; the floor was raised instead. What is worth asserting now is
+    the delegation itself, because losing it silently would reintroduce every one
+    of them.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("payload.sh")
+        info.size = 0
+        info.mode = 0o4777
+        info.uid, info.gid = 1234, 5678
+        info.uname, info.gname = "attacker", "attacker"
+        tar.addfile(info, io.BytesIO(b""))
+
+    seen: list[dict[str, object]] = []
+    real_extractall = tarfile.TarFile.extractall
+
+    def recording_extractall(self, path=None, members=None, **kwargs):
+        seen.append(dict(kwargs))
+        return real_extractall(self, path, members, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", recording_extractall)
+    extract(buffer.getvalue(), tmp_path)
+
+    assert seen == [{"filter": "data"}], "the data filter was not the one thing used"
+    if os.name == "posix":
+        mode = (tmp_path / "payload.sh").stat().st_mode & 0o7777
+        assert not mode & 0o7000, "a setuid/setgid/sticky bit survived"
+        assert not mode & 0o022, "the archive dictated group/other write"
+        assert mode & 0o600 == 0o600, "the extracted file is unusable"
 
 
 def test_a_tar_member_resolving_onto_another_is_a_collision(tmp_path: Path) -> None:

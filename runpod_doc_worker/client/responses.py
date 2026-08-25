@@ -34,8 +34,6 @@ import binascii
 import http.client
 import io
 import lzma
-import os
-import time
 import re
 import tarfile
 import threading
@@ -264,94 +262,6 @@ def _check_member_name(name: str, *, container: str) -> None:
             raise ResponseError(
                 f"refusing {container} member {name!r}: {part!r} {problem}"
             )
-
-
-def _directory_mode(destination: Path) -> int:
-    """The mode ``mkdir`` produces here and now, under the current umask.
-
-    Measured by creating a directory and looking at it, which is the only way to
-    learn this without touching process-global state. Two earlier versions were
-    each wrong in a different direction:
-
-    * reading the umask means setting it to zero and setting it back, and that is
-      process-global - another thread creating a file inside that window gets
-      permissions as though no mask were set, and two concurrent extractions can
-      interleave their swaps and leave the umask permanently changed;
-    * copying the *destination's* mode is not the same as creating under the
-      umask. An existing ``0o700`` destination under umask ``022`` made every
-      extracted subdirectory ``0o700``, and a permissive existing destination
-      overrode a restrictive umask in the other direction.
-
-    A probe answers the question that is actually being asked. It is created
-    inside ``destination`` so it lands on the same filesystem, and removed
-    immediately. Falls back to ``0o755`` when it cannot be created, which is the
-    conservative value the first version of this used.
-    """
-    probe = destination / ".runpod-doc-worker-mode-probe"
-    try:
-        probe.mkdir()
-    except OSError:
-        return 0o755
-    try:
-        # 0o7777, not 0o777. A setgid destination gives the probe an inherited
-        # 0o2000, and masking it off produced a concrete mode that legacy tarfile
-        # then applied -- clearing setgid from every extracted directory, so files
-        # created there afterwards stopped inheriting the shared group. The
-        # standard filter avoids this by not setting a mode at all; keeping the
-        # bit is how a concrete mode reproduces that.
-        return probe.stat().st_mode & 0o7777
-    except OSError:
-        return 0o755
-    finally:
-        try:
-            probe.rmdir()
-        except OSError:
-            pass
-
-
-def _apply_data_filter_mode(member: tarfile.TarInfo, directory_mode: int) -> None:
-    """Apply the stdlib ``data`` filter's permission rules to ``member``.
-
-    Transcribed from ``tarfile._get_filtered_attrs`` rather than reconstructed
-    from memory, which is the point: this is the fifth revision of this code, and
-    the first four each replicated part of the filter and missed part. In order —
-    extract with full trust; clear the dangerous bits; also grant owner
-    read/write; stop overriding directory modes; and now the conditional that was
-    missing from all of them.
-
-    That conditional is the one worth naming. The filter clears **every** execute
-    bit when owner-execute was not set, so a member archived as ``0o001`` ends up
-    ``0o600``. Masking and then OR-ing owner read/write, as this did, left it
-    ``0o601`` — still executable by others, from an untrusted archive.
-
-    Two deliberate deviations, both for the same reason: the filter expresses
-    "leave this alone" as ``None``, and the older ``tarfile`` this fallback exists
-    for passes ``None`` straight to ``os.chmod`` and ``os.chown``. Modern
-    ``TarFile.chown`` turns ``None`` into ``-1`` itself, and that guard arrived
-    with filter support — so copying the literal breaks the interpreters this code
-    exists for, exactly as it did for ``mode``. Copy the semantics instead:
-
-    * a directory gets a concrete mode derived from the destination;
-    * ownership is set to ``-1``, which is ``os.chown``'s own "do not change" and
-      an int on every version. Zero was wrong: it means *root*, so a root client
-      extracting into a setgid or shared destination replaced the inherited group
-      and could make the artifacts unreachable for the people meant to read them.
-
-    ``uname``/``gname`` stay empty so the name-based lookup in ``chown`` finds
-    nothing and cannot override the numeric values.
-    """
-    mode = member.mode
-    if mode is not None:
-        mode = mode & 0o755
-        if member.isreg() or member.islnk():
-            if not mode & 0o100:
-                mode &= ~0o111
-            mode |= 0o600
-        elif member.isdir() or member.issym():
-            mode = directory_mode
-        member.mode = mode
-    member.uid, member.gid = -1, -1
-    member.uname, member.gname = "", ""
 
 
 def within(destination: Path, name: str) -> bool:
@@ -598,8 +508,8 @@ class _ConnectionRecorder:
         super().__init__()
         self._sink = sink
 
-    def do_open(self, http_class, req, **kwargs):  # noqa: ANN001, ANN003, ANN201
-        def build(host, **connection_args):  # noqa: ANN001, ANN003, ANN202
+    def do_open(self, http_class, req, **kwargs):
+        def build(host, **connection_args):
             connection = http_class(host, **connection_args)
             self._sink["connection"] = connection
             return connection
@@ -846,41 +756,22 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                     f"refusing tar member {member.name!r}: path escapes the destination"
                 )
         try:
-            try:
-                tar.extractall(destination, filter="data")
-            except TypeError:
-                # Older patch releases have no `filter` parameter. The checks
-                # above reject links, special files and traversal, but they say
-                # nothing about permissions — so an unfiltered extractall here
-                # would honour setuid, setgid and world-writable bits and the
-                # archive's own uid/gid, which is what the `data` filter exists
-                # to strip. A crafted response could drop a setuid binary,
-                # especially with a client running as root.
-                # Directories are created here, shallowest first, so each one
-                # inherits from its *own* parent -- a setgid `shared/` passes the
-                # bit to `shared/new/`. A single probe mode applied to every
-                # directory could not do that: it was measured against the
-                # destination, so a directory created under a setgid subdirectory
-                # had that bit chmod'd away by the legacy extractall.
-                for member in sorted(
-                    (m for m in members if m.isdir()), key=lambda m: m.name.count("/")
-                ):
-                    if within(destination, member.name):
-                        made = destination / member.name
-                        try:
-                            made.mkdir(parents=True, exist_ok=True)
-                            member.mode = made.stat().st_mode & 0o7777
-                        except OSError:
-                            member.mode = _directory_mode(destination)
-                directory_mode = _directory_mode(destination)
-                for member in members:
-                    if member.isdir():
-                        # Already carries the mode its parent gave it.
-                        member.uid, member.gid = -1, -1
-                        member.uname, member.gname = "", ""
-                        continue
-                    _apply_data_filter_mode(member, directory_mode)
-                tar.extractall(destination, members=members)  # noqa: S202
+            # `filter="data"` and nothing else. It is the standard library's own
+            # hardening -- setuid/setgid and world-writable bits stripped,
+            # archive-supplied ownership discarded, links and special files
+            # refused -- and it exists in every interpreter this distribution now
+            # supports, which is the whole reason the floor was raised to 3.10.12.
+            #
+            # There used to be a filterless fallback here, 88 lines re-deriving
+            # those permission rules for 3.10.0-3.10.11. It produced six rounds of
+            # review findings on its own -- the usable-mode mask, the umask read
+            # racing other threads, an inherited setgid bit, ownership defaulting
+            # to root, `None` meaning "leave alone" to the filter and "crash" to
+            # the older `os.chmod` -- because it was a second implementation of
+            # security-relevant behaviour, kept in step with the first by hand.
+            # Deleting it removes that whole class of defect rather than the six
+            # instances of it, and costs eleven patch releases from June 2023.
+            tar.extractall(destination, filter="data")
         except (
             tarfile.TarError,
             OSError,
