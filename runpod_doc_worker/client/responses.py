@@ -72,9 +72,9 @@ class ResponseError(RuntimeError):
     ``binascii.Error`` from a decode, and ``TypeError`` from a field that was
     not the type it was annotated as — now arrives as this.
 
-    The recurring shape, learned over four review rounds on this one module: an
-    ordinary property of an untrusted response, reported by the standard library
-    with an exception type the handler did not list. Every stdlib call here is a
+    The recurring shape in this module: an ordinary property of an untrusted
+    response, reported by the standard library with an exception type the handler
+    did not list. Every stdlib call here is a
     place a malformed response can speak, not only the ones that read bytes.
     """
 
@@ -242,7 +242,7 @@ class _BoundedTarInfo(tarfile.TarInfo):
     dispatches on the member type and therefore the one place ahead of all three
     metadata readers. Guarding `_proc_pax` alone would have left the two GNU
     long-name types reachable -- the same "fixed one of the call sites" shape that
-    has come back as a finding six times in this review.
+    has repeatedly turned out to cover one caller and miss the other.
     """
 
     def _proc_member(self, archive):
@@ -749,8 +749,8 @@ def download(url: str) -> bytes:
             # nothing to cancel and no leak to report -- and reporting one anyway
             # would cry wolf on every caller that never reached the network.
             # Reported rather than ignored otherwise: a thread still running here
-            # means the cancellation did not work, and four rounds of this bug
-            # were spent believing it had.
+            # means the cancellation did not work, and this has previously been
+            # believed working while it was not.
             _log.warning(
                 "the timed-out fetch did not stop after its socket was shut down"
             )
@@ -905,8 +905,8 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             # supports, which is the whole reason the floor was raised to 3.10.12.
             #
             # There used to be a filterless fallback here, 88 lines re-deriving
-            # those permission rules for 3.10.0-3.10.11. It produced six rounds of
-            # review findings on its own -- the usable-mode mask, the umask read
+            # those permission rules for 3.10.0-3.10.11. It was a defect source in
+            # its own right -- the usable-mode mask, the umask read
             # racing other threads, an inherited setgid bit, ownership defaulting
             # to root, `None` meaning "leave alone" to the filter and "crash" to
             # the older `os.chmod` -- because it was a second implementation of

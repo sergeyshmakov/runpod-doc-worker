@@ -624,9 +624,9 @@ def test_a_complete_scan_with_no_match_still_reports_absence(tmp_path, monkeypat
 # -----------------------------------------------------------------------------
 # Choosing among cache candidates
 #
-# Four consecutive review rounds found defects in this function, all the same
-# shape: one unusable element deciding the whole answer. These pin the general
-# property rather than the individual cases.
+# Several defects in this function shared one shape: a single unusable element
+# deciding the whole answer. These pin the general property rather than the
+# individual cases.
 # -----------------------------------------------------------------------------
 
 def _hub_with(tmp_path, monkeypatch):
@@ -805,9 +805,9 @@ def test_the_model_search_does_not_follow_a_symlink_out_of_the_root(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privileges on Windows")
 def test_a_symlinked_model_dir_is_not_reported_as_being_in_the_cache(tmp_path, monkeypatch):
-    """Found by auditing for the class a reviewer raised twice, rather than by
-    being told a third time. The reported path read as though it were inside
-    the cache while resolving elsewhere."""
+    """Found by auditing for the whole class of defect rather than the one
+    instance of it. The reported path read as though it were inside the cache
+    while resolving elsewhere."""
     from runpod_doc_worker import config
 
     (tmp_path / "elsewhere" / "snapshots" / "xyz").mkdir(parents=True)

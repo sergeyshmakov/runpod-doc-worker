@@ -247,7 +247,7 @@ def test_importing_the_client_half_loads_nothing_heavy() -> None:
 
 
 # -----------------------------------------------------------------------------
-# Second review round: the boundary was leakier than the first pass thought
+# Error-boundary leaks: ordinary properties of an untrusted response
 # -----------------------------------------------------------------------------
 #
 # Every case below escaped `ResponseError` when this module was first written. They
@@ -333,7 +333,7 @@ def test_zip_extraction_failures_that_are_not_bad_zip_file(
 
 
 # -----------------------------------------------------------------------------
-# Third review round: the boundary again, plus one wrong answer
+# More boundary leaks, plus one wrong answer
 # -----------------------------------------------------------------------------
 
 def test_within_works_with_a_relative_destination() -> None:
@@ -386,13 +386,12 @@ def test_a_destination_that_cannot_be_created_is_refused(tmp_path: Path) -> None
         extract(b"junk", blocker)
 
 
-# --- Round four: the same class again, found four more times ----------------
+# --- The same class again, found four more times -----------------------------
 #
 # Every one of these is an ordinary property of an untrusted response that the
 # standard library reports with an exception type the handler had not listed.
-# After four rounds the rule is stated in the module docstring: each stdlib call
-# here is a place a malformed response can speak, not only the ones that read
-# bytes.
+# The rule is stated in the module docstring: each stdlib call here is a place a
+# malformed response can speak, not only the ones that read bytes.
 
 
 class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
@@ -491,7 +490,7 @@ def test_an_output_name_that_is_not_a_string_is_refused(name: object) -> None:
         safe_output_name(name, what="a basename")  # type: ignore[arg-type]
 
 
-# --- Round six: the isolation promise, and three more type/platform gaps ------
+# --- The isolation promise, and three more type/platform gaps ----------------
 
 
 def test_importing_the_client_does_not_load_worker_modules() -> None:
@@ -587,7 +586,7 @@ def test_names_merely_starting_like_a_device_are_allowed(name: str) -> None:
     assert safe_output_name(name, what="a basename") == name
 
 
-# --- Round eight: the name collision, and destination resolution -------------
+# --- The name collision, and destination resolution --------------------------
 
 
 def test_the_client_url_helper_does_not_share_a_name_with_the_worker_one() -> None:
@@ -628,7 +627,7 @@ def test_a_destination_with_a_nul_is_refused() -> None:
         extract(b"x", "bad\0dir")
 
 
-# --- Round nine: authority, redirects, usable modes, strided buffers ---------
+# --- Authority, redirects, usable modes, strided buffers ---------------------
 
 
 def test_percent_encoded_userinfo_is_refused() -> None:
@@ -665,7 +664,7 @@ def test_a_strided_memoryview_is_handled(payload: object, tmp_path: Path) -> Non
         extract(payload, tmp_path)  # type: ignore[arg-type]
 
 
-# --- Round ten: redirect schemes, within(), umask, Windows characters --------
+# --- Redirect schemes, within(), umask, Windows characters -------------------
 
 
 @pytest.mark.parametrize("name", ["report?.txt", "a*.png", "x|y.txt", 'q"t.md', "a<b.md", "a>b.md"])
@@ -726,7 +725,7 @@ def test_the_opener_offers_only_http_handlers() -> None:
     assert "FileHandler" not in names
 
 
-# --- Round twelve: zip names, symlink loops, name length ---------------------
+# --- Zip names, symlink loops, name length -----------------------------------
 
 
 def test_a_zip_with_invalid_utf8_names_is_refused(tmp_path: Path) -> None:
@@ -811,7 +810,7 @@ def test_within_normalises_a_resolution_runtime_error(
         within(Path("loop"), "member.md")
 
 
-# --- Round thirteen: more zip constructor failures, surrogates ---------------
+# --- More zip constructor failures, surrogates -------------------------------
 
 
 def _zip_with(mutate) -> bytes:
@@ -871,7 +870,7 @@ def test_an_unpaired_surrogate_in_an_output_name_is_refused() -> None:
 
     The length check measured with errors="surrogatepass" so it could not crash,
     which silently admitted a name that raises UnicodeEncodeError the moment the
-    caller writes it. That was a hole created by the previous round's fix.
+    caller writes it, which the narrower check did not cover.
     """
     name = "x" + chr(0xD800) + ".txt"
     with pytest.raises(ResponseError, match="not encodable as UTF-8"):
@@ -884,7 +883,7 @@ def test_encodable_names_still_pass(name: str) -> None:
     assert safe_output_name(name, what="a basename") == name
 
 
-# --- Round fourteen: the data filter's real rules, and timestamps ------------
+# --- The data filter's real rules, and timestamps ----------------------------
 
 
 @pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
@@ -921,7 +920,7 @@ def test_an_unusable_timestamp_is_refused(
     assert real_utime is not None  # the monkeypatch is scoped to this test
 
 
-# --- Round fifteen: device spellings, the umask race, neutral ownership ------
+# --- Device spellings, the umask race, neutral ownership ---------------------
 
 
 @pytest.mark.parametrize(
@@ -957,7 +956,7 @@ def test_the_module_no_longer_touches_the_umask() -> None:
     assert "os.umask" not in source
 
 
-# --- Round sixteen: container detection, bounds, and the mode probe ----------
+# --- Container detection, bounds, and the mode probe -------------------------
 
 
 def test_a_tar_containing_a_zip_is_extracted_as_a_tar(tmp_path: Path) -> None:
@@ -1089,7 +1088,7 @@ def test_a_destination_that_is_a_symlink_loop_is_refused(tmp_path: Path) -> None
         extract(b"junk", loop)
 
 
-# --- Round seventeen: tar quotas, member paths, inherited setgid -------------
+# --- Tar quotas, member paths, inherited setgid ------------------------------
 
 
 def _tar_of(names: list[str], *, size: int = 0, mode: str = "w") -> bytes:
@@ -1158,7 +1157,7 @@ def test_ordinary_member_paths_still_extract(tmp_path: Path) -> None:
     assert (tmp_path / "images" / "fig.jpg").is_file()
 
 
-# --- Round eighteen: one filename rule, incremental quotas, a deadline -------
+# --- One filename rule, incremental quotas, a deadline -----------------------
 
 
 def test_members_windows_would_collapse_together_are_refused(tmp_path: Path) -> None:
@@ -1247,7 +1246,7 @@ def test_a_download_that_never_finishes_hits_the_deadline(
         download("https://example.com/trickle.tar")
 
 
-# --- Round nineteen: the deadline covers open, and zip is preflighted --------
+# --- The deadline covers open, and zip is preflighted ------------------------
 
 
 def test_the_deadline_covers_connection_and_headers(
@@ -1317,7 +1316,7 @@ def test_a_zip_declaring_too_many_entries_is_refused_before_parsing(
     entries exhaust memory and surface as MemoryError rather than a refusal.
 
     Same shape as the tar `getmembers()` finding — and the same mistake of fixing
-    one container and leaving the other, which is twice in this review.
+    one container and leaving the other.
     """
     monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 10)
     buffer = io.BytesIO()
@@ -1346,7 +1345,7 @@ def test_an_ordinary_zip_still_extracts_after_the_preflight(tmp_path: Path) -> N
     assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "# hello"
 
 
-# --- Round twenty: case collisions, a counted directory, zstd ----------------
+# --- Case collisions, a counted directory, zstd ------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1433,7 +1432,7 @@ def test_the_decompression_tuple_tracks_the_interpreter() -> None:
         assert "ZstdError" in names
 
 
-# --- Round twenty-two: canonical paths, prepended data, a real deadline ------
+# --- Canonical paths, prepended data, a real deadline ------------------------
 
 
 def test_dot_components_collide_with_their_canonical_form(tmp_path: Path) -> None:
@@ -1528,7 +1527,7 @@ def test_a_successful_fetch_still_returns_its_body(
     assert download("https://example.com/ok.tar") == b"hello"
 
 
-# --- Round twenty-three: parent components, ZIP64, real cancellation ---------
+# --- Parent components, ZIP64, real cancellation -----------------------------
 
 
 def test_parent_components_collide_with_their_canonical_form(tmp_path: Path) -> None:
@@ -1608,7 +1607,7 @@ def test_a_timed_out_fetch_closes_its_response(
     assert closed, "the response was abandoned rather than closed"
 
 
-# --- Round twenty-four: container semantics, ZIP64 stubs, header stalls ------
+# --- Container semantics, ZIP64 stubs, header stalls -------------------------
 
 
 def _metadata_header(member_type: bytes, size: int, name: str) -> bytes:
@@ -1642,8 +1641,8 @@ def test_oversized_member_metadata_is_refused(
     could make one call allocate megabytes while announcing an empty file, and a
     large enough one exhausts memory and leaks a raw `MemoryError`.
 
-    All four metadata types, not just the PAX pair the finding named -- they share
-    one dispatch point and therefore one guard.
+    All four metadata types, not just the PAX pair -- they share one dispatch
+    point and therefore one guard.
     """
     payload = _metadata_header(member_type, MAX_METADATA_BYTES + 1, name)
     with pytest.raises(ResponseError, match="metadata"):
@@ -1681,8 +1680,8 @@ def test_extraction_delegates_the_permission_rules_to_the_stdlib(
 
     This replaces nine tests that checked a hand-written copy of the filter's
     permission rules, kept for interpreters older than 3.10.12. That copy was a
-    second implementation of security-relevant behaviour and produced six separate
-    review findings; the floor was raised instead. What is worth asserting now is
+    second implementation of security-relevant behaviour and a recurring source of
+    defects; the floor was raised instead. What is worth asserting now is
     the delegation itself, because losing it silently would reintroduce every one
     of them.
     """
@@ -1928,7 +1927,7 @@ def test_the_deadline_cancels_a_stall_before_the_headers_arrive(
         release.set()
 
 
-# --- Round twenty-five: bounded detection, real cancellation, normalisation ---
+# --- Bounded detection, real cancellation, normalisation ---------------------
 
 
 def _oversized_pax_gzip() -> bytes:
@@ -2050,24 +2049,24 @@ def test_a_timed_out_fetch_really_releases_its_connection(
 ) -> None:
     """Against a real socket, and asserting a number that a stub cannot produce.
 
-    Five rounds on this deadline, and the first four were each verified with a fake
-    opener that answered the question the fix asked it. The failure the fifth found
+    A fake opener can only answer the question the fix asks it, and this failure
     is one no stub can show: closing the `HTTPConnection` does not release the
     descriptor, because `HTTPResponse` holds a file object made from the same
     socket and a socket with outstanding `makefile` references keeps its descriptor
     on close. So the connection survived and the server kept writing.
 
-    The first version of *this* test asked only whether the server's writes
-    eventually failed, and passed with the fix disabled -- they fail either way,
-    just later. What separates the two is how much the server gets to write after
-    the deadline has already fired. Measured on Linux through this exact path:
+    Asking whether the server's writes eventually fail is not enough either -- they
+    fail either way, just later. What separates the two is how much the server gets
+    to write after the deadline has already fired. Measured on Linux through this
+    exact path:
 
         shutdown        1 write after the deadline, download returned in 0.40s
         no shutdown    32 writes after the deadline, download returned in 1.40s
 
     So the assertion is on that count, with room for the one write already in
     flight. Windows tears the connection down on close by itself, which is why the
-    earlier round looked fine locally and this is checked in the Linux matrix.
+    same code passes on Windows regardless, so this is checked in the Linux
+    matrix.
     """
     monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.4)
     listener = socket.socket()
