@@ -545,6 +545,12 @@ def download(url: str) -> bytes:
     needs to catch.
     """
     require_fetchable_url(url)
+    # Started before `open()`, not after it. Connection setup, every redirect hop
+    # and the response headers all happen inside that call, and a server can
+    # trickle header bytes often enough to keep the per-socket idle timeout from
+    # firing -- so a timer started afterwards bounded only the part that was
+    # already bounded by the byte cap.
+    started = time.monotonic()
     try:
         with _opener().open(  # noqa: S310 - scheme checked, redirects checked
             url, timeout=DOWNLOAD_TIMEOUT_SECONDS
@@ -561,9 +567,13 @@ def download(url: str) -> bytes:
                     f"the archive is {int(declared)} bytes, over the "
                     f"{MAX_ARCHIVE_BYTES}-byte limit"
                 )
+            if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
+                raise ResponseError(
+                    f"fetching the archive exceeded "
+                    f"{DOWNLOAD_DEADLINE_SECONDS:.0f}s before the body arrived"
+                )
             chunks: list[bytes] = []
             total = 0
-            started = time.monotonic()
             while True:
                 if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
                     raise ResponseError(
@@ -765,7 +775,42 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             raise ResponseError(f"the archive could not be extracted: {e}") from e
 
 
+def _declared_zip_entries(data: bytes) -> int | None:
+    """Entry count from the end-of-central-directory record, or None if unreadable.
+
+    Read before constructing ``ZipFile``, which parses the whole central directory
+    and materialises a ``ZipInfo`` per entry in ``filelist``. A zip declaring
+    millions of empty entries stays far below the download cap and exhausts memory
+    there -- surfacing as ``MemoryError`` rather than a refusal. This is the same
+    shape as the tar ``getmembers()`` finding, and the same mistake of fixing one
+    container and leaving the other, which is now twice in this review.
+
+    Returning None on anything unexpected is deliberate: this is a cheap
+    pre-filter, and ``ZipFile`` remains the authority on whether the archive is
+    readable at all.
+    """
+    tail = data[-(65_536 + 22):]
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < 22:
+        return None
+    count = int.from_bytes(tail[at + 10 : at + 12], "little")
+    if count != 0xFFFF:
+        return count
+    # ZIP64: the 16-bit field is saturated, so the real count is in the ZIP64
+    # end-of-central-directory record earlier in the tail.
+    at64 = tail.rfind(b"PK\x06\x06", 0, at)
+    if at64 < 0 or len(tail) - at64 < 56:
+        return None
+    return int.from_bytes(tail[at64 + 32 : at64 + 40], "little")
+
+
 def _extract_zip(data: bytes, destination: Path) -> None:
+    declared_entries = _declared_zip_entries(data)
+    if declared_entries is not None and declared_entries > MAX_ARCHIVE_MEMBERS:
+        raise ResponseError(
+            f"the archive declares {declared_entries} members, over the "
+            f"{MAX_ARCHIVE_MEMBERS} limit"
+        )
     try:
         zip_file = zipfile.ZipFile(io.BytesIO(data))
     except (

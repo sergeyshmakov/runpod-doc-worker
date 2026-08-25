@@ -1542,3 +1542,85 @@ def test_a_download_that_never_finishes_hits_the_deadline(
     )
     with pytest.raises(ResponseError, match="exceeded"):
         download("https://example.com/trickle.tar")
+
+
+# --- Round nineteen: the deadline covers open, and zip is preflighted --------
+
+
+def test_the_deadline_covers_connection_and_headers(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timer started after `open()` returned, so connection setup, every
+    redirect hop and the response headers were all outside it — and a server can
+    trickle header bytes often enough that the per-socket idle timeout never
+    fires. A deadline that begins after the slow part is not a deadline."""
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.01)
+
+    class _SlowOpen:
+        def open(self, *args: object, **kwargs: object):
+            time.sleep(0.05)
+
+            class _Empty:
+                headers: dict[str, str] = {}
+
+                def read(self, size: int = -1) -> bytes:
+                    return b""
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc: object) -> None:
+                    return None
+
+            return _Empty()
+
+    monkeypatch.setattr(responses, "_opener", lambda: _SlowOpen())
+    with pytest.raises(ResponseError, match="exceeded"):
+        download("https://example.com/slow.tar")
+
+
+def test_the_zip_entry_count_is_read_before_parsing(tmp_path: Path) -> None:
+    """The preflight reads the end-of-central-directory record directly, so a
+    hostile count is refused before `ZipFile` materialises a ZipInfo per entry."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(40):
+            archive.writestr(f"f{index}.txt", "")
+    assert responses._declared_zip_entries(buffer.getvalue()) == 40
+
+
+def test_a_zip_declaring_too_many_entries_is_refused_before_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ZipFile()` parses the whole central directory and materialises every
+    ZipInfo in `filelist` before any member check runs, so millions of empty
+    entries exhaust memory and surface as MemoryError rather than a refusal.
+
+    Same shape as the tar `getmembers()` finding — and the same mistake of fixing
+    one container and leaving the other, which is twice in this review.
+    """
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 10)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(40):
+            archive.writestr(f"f{index}.txt", "")
+    with pytest.raises(ResponseError, match="members"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_the_preflight_declines_to_guess(tmp_path: Path) -> None:
+    """Returning None on anything unexpected is deliberate: this is a cheap
+    pre-filter and `ZipFile` stays the authority on readability. A body with no
+    EOCD must not be refused *by the preflight* — it is refused, but as an
+    unreadable archive."""
+    assert responses._declared_zip_entries(b"not an archive at all") is None
+    with pytest.raises(ResponseError, match="could not be read"):
+        extract(b"PK\x03\x04 truncated", tmp_path)
+
+
+def test_an_ordinary_zip_still_extracts_after_the_preflight(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.md", "# hello")
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "# hello"
