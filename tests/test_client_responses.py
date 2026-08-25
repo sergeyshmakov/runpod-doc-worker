@@ -14,9 +14,11 @@ library documenting a single error class.
 from __future__ import annotations
 
 import base64
+import gzip
 import http.server
 import io
 import os
+import socket
 import socketserver
 import subprocess
 import sys
@@ -30,19 +32,17 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.client.responses import MAX_METADATA_BYTES
-
-from runpod_doc_worker.client import responses
 from runpod_doc_worker.client import (
     ResponseError,
     decode_b64,
     download,
     extract,
     require_fetchable_url,
+    responses,
     safe_output_name,
     within,
 )
-
+from runpod_doc_worker.client.responses import MAX_METADATA_BYTES
 
 # -----------------------------------------------------------------------------
 # Strict base64
@@ -1926,3 +1926,189 @@ def test_the_deadline_cancels_a_stall_before_the_headers_arrive(
         )
     finally:
         release.set()
+
+
+# --- Round twenty-five: bounded detection, real cancellation, normalisation ---
+
+
+def _oversized_pax_gzip() -> bytes:
+    """A tiny gzip whose first member carries a two-mebibyte PAX value.
+
+    The point of the fixture is the ratio: the archive is small enough to pass
+    every size check on the way in, and the metadata alone is larger than the
+    limit. Compressing highly repetitive bytes is what makes that possible, which
+    is why a byte-count check on the *response* cannot catch this.
+    """
+    value = b"x" * (2 * 1024 * 1024)
+    prefix = len(b" path=\n") + len(str(len(value))) + len(value)
+    records = b"%d path=%s\n" % (prefix, value)
+    header = tarfile.TarInfo("pax_header")
+    header.type = tarfile.XHDTYPE
+    header.size = len(records)
+    member = tarfile.TarInfo("doc.md")
+    member.size = 0
+    raw = (
+        header.tobuf(tarfile.GNU_FORMAT)
+        + records
+        + b"\0" * ((-len(records)) % 512)
+        + member.tobuf(tarfile.GNU_FORMAT)
+        + b"\0" * 1024
+    )
+    return gzip.compress(raw, 9)
+
+
+def test_detection_does_not_read_metadata_the_bound_would_refuse(
+    tmp_path: Path,
+) -> None:
+    """The bound was installed by `tarinfo=`, so it applied to extraction and not
+    to detection -- and detection parses the first member, which is where the
+    oversized block sits.
+
+    Measured before the fix: a 2,180-byte gzip decompressed 2,098,688 bytes inside
+    `is_tarfile` alone, and only then did the limit refuse it. The refusal was
+    real and the allocation had already happened, which makes the bound decorative
+    on exactly the input that defeats it.
+    """
+    payload = _oversized_pax_gzip()
+    assert len(payload) < 8192, "the fixture must be small to make the point"
+
+    decompressed = 0
+    real_read = gzip.GzipFile.read
+
+    def counting_read(self, size=-1):
+        nonlocal decompressed
+        chunk = real_read(self, size)
+        decompressed += len(chunk)
+        return chunk
+
+    gzip.GzipFile.read = counting_read
+    try:
+        with pytest.raises(ResponseError, match="metadata"):
+            extract(payload, tmp_path)
+    finally:
+        gzip.GzipFile.read = real_read
+
+    assert decompressed < MAX_METADATA_BYTES + 65536, (
+        f"decompressed {decompressed} bytes before refusing; the bound has to "
+        f"apply to detection as well as extraction"
+    )
+
+
+def test_there_is_one_place_that_opens_a_tar() -> None:
+    """The reason the bound missed detection was two call sites, so the invariant
+    worth asserting is that there is now one. A second `tarfile.open` would
+    reintroduce the whole finding rather than a variant of it."""
+    source = Path(responses.__file__).read_text(encoding="utf-8")
+    assert source.count("tarfile.open(") == 1, (
+        "every tar must be opened through _open_tar, which installs the bound"
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("r\u00e9sum\u00e9.txt", "re\u0301sume\u0301.txt"),
+        ("\u00c5ngstr\u00f6m.md", "A\u030angstro\u0308m.md"),
+    ],
+)
+def test_canonically_equivalent_names_are_one_file(
+    tmp_path: Path, first: str, second: str
+) -> None:
+    """macOS is normalisation-insensitive as well as case-insensitive, so NFC and
+    NFD spellings of the same name are one file there -- and `casefold` leaves the
+    two strings distinct, so the archive passed the check and the second member
+    silently overwrote the first.
+
+    The same shape as the case and the parent-component findings: three ways for
+    two names to be one file, and this check has now been wrong about each of
+    them once.
+    """
+    assert first != second, "the fixture must be two distinct strings"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(first, "first")
+        archive.writestr(second, "second")
+    with pytest.raises(ResponseError, match="same file"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_normalisation_does_not_merge_genuinely_different_names(
+    tmp_path: Path,
+) -> None:
+    """The guard: normalisation folds spellings of one character, not different
+    characters. A check that refused these would reject ordinary archives."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("r\u00e9sum\u00e9.txt", "accented")
+        archive.writestr("resume.txt", "plain")
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / "resume.txt").read_text(encoding="utf-8") == "plain"
+
+
+def test_a_timed_out_fetch_really_releases_its_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Against a real socket, and asserting a number that a stub cannot produce.
+
+    Five rounds on this deadline, and the first four were each verified with a fake
+    opener that answered the question the fix asked it. The failure the fifth found
+    is one no stub can show: closing the `HTTPConnection` does not release the
+    descriptor, because `HTTPResponse` holds a file object made from the same
+    socket and a socket with outstanding `makefile` references keeps its descriptor
+    on close. So the connection survived and the server kept writing.
+
+    The first version of *this* test asked only whether the server's writes
+    eventually failed, and passed with the fix disabled -- they fail either way,
+    just later. What separates the two is how much the server gets to write after
+    the deadline has already fired. Measured on Linux through this exact path:
+
+        shutdown        1 write after the deadline, download returned in 0.40s
+        no shutdown    32 writes after the deadline, download returned in 1.40s
+
+    So the assertion is on that count, with room for the one write already in
+    flight. Windows tears the connection down on close by itself, which is why the
+    earlier round looked fine locally and this is checked in the Linux matrix.
+    """
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.4)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    fired = threading.Event()
+    finished = threading.Event()
+    after_deadline = 0
+    served = threading.Event()
+
+    def serve() -> None:
+        nonlocal after_deadline
+        connection, _ = listener.accept()
+        served.set()
+        try:
+            connection.recv(4096)
+            connection.sendall(b"HTTP/1.1 200 OK\r\n")
+            for _ in range(400):
+                connection.sendall(b"X-Trickle: 1\r\n")
+                if fired.is_set():
+                    after_deadline += 1
+                time.sleep(0.02)
+        except OSError:
+            pass
+        finally:
+            finished.set()
+            connection.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        with pytest.raises(ResponseError, match="exceeded"):
+            download(f"http://127.0.0.1:{port}/trickle.tar")
+        fired.set()
+        assert served.is_set(), "the fixture never accepted a connection"
+        assert finished.wait(5.0), "the server loop never ended"
+        assert after_deadline <= 3, (
+            f"the server completed {after_deadline} writes after the deadline; the "
+            f"connection was closed by reference but its descriptor was never shut "
+            f"down, so the fetch went on reading"
+        )
+    finally:
+        listener.close()

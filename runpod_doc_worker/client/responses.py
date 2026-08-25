@@ -33,10 +33,13 @@ import base64
 import binascii
 import http.client
 import io
+import logging
 import lzma
 import re
+import socket
 import tarfile
 import threading
+import unicodedata
 import urllib.error
 import urllib.request
 import zipfile
@@ -48,6 +51,11 @@ except ImportError:  # pragma: no cover - earlier releases
     _ZstdError = None
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+# Stdlib logging, not the harness logger: this module's stated property is
+# that it imports nothing outside the standard library, and a client that
+# reaches for it should not acquire the worker's logging stack to do so.
+_log = logging.getLogger(__name__)
 
 
 class ResponseError(RuntimeError):
@@ -271,7 +279,15 @@ def _canonical_member(name: str, *, container: str) -> str:
                 parts.pop()
             continue
         parts.append(part)
-    return "/".join(parts).casefold()
+    # Normalised before folding. macOS is normalisation-insensitive as well as
+    # case-insensitive, so NFC `\u00e9` and NFD `e` + combining acute are one file
+    # there -- and `casefold` leaves the two strings distinct, so the archive
+    # passed this check and the second member overwrote the first. Folded again
+    # afterwards, then re-normalised, because case folding can itself denormalise
+    # its result; that is the composition the Unicode caseless-matching rule
+    # specifies rather than something invented here.
+    joined = unicodedata.normalize("NFC", "/".join(parts))
+    return unicodedata.normalize("NFC", joined.casefold())
 
 
 def _check_member_collisions(names: list[str], *, container: str) -> None:
@@ -694,10 +710,26 @@ def download(url: str) -> bytes:
         # the deadline bounded only the *caller*: the fetch carried on reading, and
         # a series of timed-out downloads accumulated a thread, a connection and a
         # growing chunk list apiece.
-        # Both, in this order. The response exists only once the headers have been
-        # read, so a timeout during the header phase has nothing but the
-        # connection to close -- closing only the response bounded the body phase
-        # and left the earlier one uncancellable.
+        # Shut the socket down first, then close. `close()` on either object is
+        # not enough on its own: `HTTPResponse` holds a file object made from the
+        # same socket, and a socket with outstanding `makefile` references does
+        # not release its descriptor when closed -- so the connection survived.
+        # Measured on Linux against a trickling local server: after `close()`
+        # alone the server went on writing headers successfully, and after
+        # `shutdown` its next write failed. `shutdown` acts on the descriptor
+        # rather than on a reference to it, which is the whole difference.
+        connection = outcome.get("connection")
+        sock = getattr(connection, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                # Already gone, or never connected. Either way there is nothing
+                # left to cancel.
+                pass
+        # Then both objects, response first: it owns the file wrapper, and the
+        # response only exists once the headers have been read, so a timeout in
+        # the header phase has only the connection.
         for key in ("response", "connection"):
             target = outcome.get(key)
             close = getattr(target, "close", None)
@@ -706,7 +738,22 @@ def download(url: str) -> bytes:
                     close()
                 except Exception:  # noqa: BLE001 - already abandoning this fetch
                     pass
+        # Brief, and deliberately not longer. After a shutdown the blocked read
+        # raises at once, so a second is generous -- and waiting any longer would
+        # turn "the deadline bounds the caller" into "the deadline plus the wait",
+        # which is the guarantee this whole path exists to provide. A first
+        # attempt at this used five seconds and broke exactly that.
         worker.join(1.0)
+        if worker.is_alive() and sock is not None:
+            # Only when there was a socket to shut down. Without one there was
+            # nothing to cancel and no leak to report -- and reporting one anyway
+            # would cry wolf on every caller that never reached the network.
+            # Reported rather than ignored otherwise: a thread still running here
+            # means the cancellation did not work, and four rounds of this bug
+            # were spent believing it had.
+            _log.warning(
+                "the timed-out fetch did not stop after its socket was shut down"
+            )
         raise ResponseError(
             f"fetching the archive exceeded {DOWNLOAD_DEADLINE_SECONDS:.0f}s"
         )
@@ -738,6 +785,41 @@ def download(url: str) -> bytes:
     return body
 
 
+def _open_tar(data: bytes) -> tarfile.TarFile:
+    """Open a tar with the bounded parser. The only place that opens one.
+
+    It became the only place because there had been two. The metadata bound is
+    installed by passing ``tarinfo=``, so it applied to extraction and not to the
+    ``is_tarfile`` call that *detects* a tar -- and detection parses the first
+    member, which is exactly where an oversized PAX or GNU long-name block sits.
+    A 2,180-byte gzip decompressed 2,098,688 bytes there before the limit further
+    down could refuse anything, so the bound existed and the archive that defeats
+    it never reached it.
+
+    That is the same "fixed one of two call sites" shape as six earlier findings in
+    this review, and the answer is the same: one producer, so the next thing added
+    here cannot apply to one caller and miss the other.
+    """
+    return tarfile.open(fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo)
+
+
+def _looks_like_tar(data: bytes) -> bool:
+    """Whether this is a tar, decided by the bounded parser.
+
+    Reimplements ``tarfile.is_tarfile``'s contract rather than calling it, because
+    that function offers no way to pass ``tarinfo=``. The contract copied is the
+    error split, which matters: a ``TarError`` means "not a tar" and a
+    decompression or OS error means "unreadable", and the caller renders those
+    differently. A ``ResponseError`` from the metadata bound is neither, so it
+    propagates -- refusing at detection, which is the point.
+    """
+    try:
+        with _open_tar(data):
+            return True
+    except tarfile.TarError:
+        return False
+
+
 def _extract_tar(data: bytes, destination: Path) -> None:
     """Extract a tar, refusing members that escape or are not regular files.
 
@@ -747,9 +829,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     default-filter deprecation.
     """
     try:
-        tar_file = tarfile.open(
-            fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo
-        )
+        tar_file = _open_tar(data)
     except (
         tarfile.TarError,
         OSError,
@@ -1096,11 +1176,15 @@ def extract(data: bytes, dest_dir: str | Path) -> Path:
     # dropping every real member. A wrong answer with no error, which is the worst
     # shape available here.
     #
-    # `is_tarfile` reads the header magic at a fixed offset, so it has no such
-    # ambiguity and can decide first.
+    # Tar detection has no such ambiguity and can decide first. The comment here
+    # used to say `is_tarfile` reads header magic at a fixed offset, which is
+    # wrong for a compressed tar and is a fair part of why the metadata bound was
+    # missing from this path: detection *parses the first member*, decompressing
+    # whatever that takes. So it goes through the same bounded parser extraction
+    # uses.
     try:
-        looks_like_tar = tarfile.is_tarfile(io.BytesIO(data))
-    except (ValueError, OSError, tarfile.TarError, *_DECOMPRESSION_ERRORS) as e:
+        looks_like_tar = _looks_like_tar(data)
+    except (ValueError, OSError, *_DECOMPRESSION_ERRORS) as e:
         raise ResponseError(f"the archive could not be read: {e}") from e
     if looks_like_tar:
         _extract_tar(data, destination)
