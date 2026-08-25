@@ -132,6 +132,34 @@ def _device_stem(name: str) -> str:
     return stem.rstrip(" .").upper()
 
 
+def _check_member_name(name: str, *, container: str) -> None:
+    """Refuse an archive member whose path Windows would not treat as a file.
+
+    Containment is not enough. `within` answers "does this land under the
+    destination", and a member called `NUL` or `document.txt:payload` does -- but
+    tarfile then opens a DOS device or an NTFS alternate data stream instead of
+    creating an artifact, so the member is silently discarded or hidden while
+    extraction reports success.
+
+    Checked per component, and on every platform for the same reason
+    `safe_output_name` is: the worker producing the archive and the client
+    unpacking it need not be on the same OS.
+    """
+    for part in name.replace("\\", "/").split("/"):
+        if not part or part in (".", ".."):
+            continue
+        if ":" in part:
+            raise ResponseError(
+                f"refusing {container} member {name!r}: "
+                f"{part!r} is alternate-data-stream syntax on Windows"
+            )
+        if _device_stem(part) in _DOS_DEVICE_NAMES:
+            raise ResponseError(
+                f"refusing {container} member {name!r}: "
+                f"{part!r} is a reserved device name on Windows"
+            )
+
+
 def _directory_mode(destination: Path) -> int:
     """The mode ``mkdir`` produces here and now, under the current umask.
 
@@ -159,7 +187,13 @@ def _directory_mode(destination: Path) -> int:
     except OSError:
         return 0o755
     try:
-        return probe.stat().st_mode & 0o777
+        # 0o7777, not 0o777. A setgid destination gives the probe an inherited
+        # 0o2000, and masking it off produced a concrete mode that legacy tarfile
+        # then applied -- clearing setgid from every extracted directory, so files
+        # created there afterwards stopped inheriting the shared group. The
+        # standard filter avoids this by not setting a mode at all; keeping the
+        # bit is how a concrete mode reproduces that.
+        return probe.stat().st_mode & 0o7777
     except OSError:
         return 0o755
     finally:
@@ -594,7 +628,23 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             # Widening only the extraction handler left this case escaping, which
             # is why the fix was verified by reproduction rather than by reading.
             raise ResponseError(f"the archive could not be read: {e}") from e
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ResponseError(
+                f"the archive declares {len(members)} members, over the "
+                f"{MAX_ARCHIVE_MEMBERS} limit"
+            )
+        # The same expansion cap the zip path has. A compressed tar hides the
+        # ratio just as effectively -- a 541-byte gzip expanding to 50 KB was the
+        # reproduction -- and enforcing this on only one container meant the
+        # protection depended on which format the worker happened to send.
+        declared_total = sum(member.size for member in members)
+        if declared_total > MAX_EXTRACTED_BYTES:
+            raise ResponseError(
+                f"the archive expands to {declared_total} bytes, over the "
+                f"{MAX_EXTRACTED_BYTES}-byte limit"
+            )
         for member in members:
+            _check_member_name(member.name, container="tar")
             if not (member.isfile() or member.isdir()):
                 raise ResponseError(
                     f"refusing unsafe tar member {member.name!r} "
@@ -692,6 +742,7 @@ def _extract_zip(data: bytes, destination: Path) -> None:
                 f"{MAX_EXTRACTED_BYTES}-byte limit"
             )
         for name in archive.namelist():
+            _check_member_name(name, container="zip")
             if not within(destination, name):
                 raise ResponseError(
                     f"refusing zip member {name!r}: path escapes the destination"

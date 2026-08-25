@@ -1361,3 +1361,94 @@ def test_a_destination_that_is_a_symlink_loop_is_refused(tmp_path: Path) -> None
         pytest.skip("symlinks are not available here")
     with pytest.raises(ResponseError):
         extract(b"junk", loop)
+
+
+# --- Round seventeen: tar quotas, member paths, inherited setgid -------------
+
+
+def _tar_of(names: list[str], *, size: int = 0, mode: str = "w") -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode=mode) as tar:
+        for name in names:
+            body = b"0" * size
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    return buffer.getvalue()
+
+
+def test_a_tar_declaring_too_many_members_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The quotas were enforced only by the zip path, so the protection depended
+    on which container the worker happened to send."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 10)
+    with pytest.raises(ResponseError, match="members"):
+        extract(_tar_of([f"f{i}.txt" for i in range(50)]), tmp_path)
+
+
+def test_a_compressed_tar_declaring_a_huge_expansion_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compressed tar hides the ratio exactly as a zip does: the reproduction
+    was a 541-byte gzip expanding to 50 KB."""
+    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 1000)
+    data = _tar_of([f"f{i}.txt" for i in range(50)], size=1000, mode="w:gz")
+    assert len(data) < 5000, "the archive itself must be small"
+    with pytest.raises(ResponseError, match="expands to"):
+        extract(data, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["document.txt:payload", "NUL", "sub/COM1.txt", "sub/aux.log", "LPT9"],
+)
+def test_a_windows_special_member_path_is_refused(name: str, tmp_path: Path) -> None:
+    """Containment is not enough: `within` says these land under the destination,
+    and they do — but tarfile then opens a DOS device or an NTFS alternate data
+    stream instead of creating an artifact, so the member is silently discarded
+    or hidden while extraction reports success.
+
+    Checked per path component, and on every platform, for the same reason
+    `safe_output_name` is: the worker writing the archive and the client
+    unpacking it need not share an OS.
+    """
+    with pytest.raises(ResponseError, match="refusing tar member"):
+        extract(_tar_of([name]), tmp_path)
+
+
+def test_the_same_check_applies_to_zip_members(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("doc.txt:ads", "x")
+    with pytest.raises(ResponseError, match="refusing zip member"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_ordinary_member_paths_still_extract(tmp_path: Path) -> None:
+    """The constraint: a nested path with an extension must stay ordinary."""
+    extract(_tar_of(["doc.md", "images/fig.jpg"], size=4), tmp_path)
+    assert (tmp_path / "doc.md").is_file()
+    assert (tmp_path / "images" / "fig.jpg").is_file()
+
+
+def test_the_directory_mode_keeps_an_inherited_setgid_bit(tmp_path: Path) -> None:
+    """A setgid destination gives the probe an inherited 0o2000, and masking with
+    0o777 dropped it — so legacy tarfile applied a concrete mode that cleared
+    setgid from every extracted directory, and files created there afterwards
+    stopped inheriting the shared group.
+
+    Skipped where setgid is not a filesystem concept.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    try:
+        shared.chmod(0o2775)
+    except (OSError, NotImplementedError):
+        pytest.skip("setgid is not supported here")
+    if not shared.stat().st_mode & 0o2000:
+        pytest.skip("the filesystem did not honour setgid")
+
+    mode = responses._directory_mode(shared)
+    assert mode & 0o2000, "the inherited setgid bit was discarded"
+    assert not list(shared.iterdir()), "the probe must clean up after itself"
