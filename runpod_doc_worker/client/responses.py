@@ -35,6 +35,7 @@ import http.client
 import io
 import lzma
 import os
+import time
 import re
 import tarfile
 import urllib.error
@@ -70,6 +71,12 @@ class ResponseError(RuntimeError):
 # output, short enough that a dead URL cannot hang a caller forever. Mirrors the
 # worker-side fetch timeout in runpod_doc_worker.transport.io.
 DOWNLOAD_TIMEOUT_SECONDS = 120.0
+
+# Total wall-clock a fetch may take. The socket timeout above bounds only *idle*
+# time and is reset by every successful read, so a peer trickling a few bytes
+# before each timeout can hold the call open indefinitely without ever
+# approaching the byte cap. Generous enough for a large archive over a slow link.
+DOWNLOAD_DEADLINE_SECONDS = 900.0
 
 # Base64 alphabet plus the padding character. Used to report *what* is wrong with
 # a payload rather than only that something is.
@@ -132,31 +139,59 @@ def _device_stem(name: str) -> str:
     return stem.rstrip(" .").upper()
 
 
+def _windows_component_problem(part: str) -> str | None:
+    """Why Windows cannot store a path component under this exact name, or None.
+
+    One rule with two callers. ``safe_output_name`` had the full set and
+    ``_check_member_name`` was written as a fresh, narrower copy that knew only
+    about device names and colons, so ``a?.txt`` was refused as an output name and
+    accepted as an archive member. That gap is not cosmetic: Windows silently
+    rewrites both ``a?.txt`` and ``a*.txt`` to ``a_.txt``, so an archive carrying
+    both has one overwrite the other while extraction reports success.
+
+    Duplicating a rule and weakening the copy is the failure here, not the
+    characters that were missing from it.
+
+    Ordered most specific first, so the reason given is the useful one: ``NUL.``
+    is reported as a device name rather than as a trailing dot.
+    """
+    if any(character < chr(32) or character == chr(127) for character in part):
+        return "contains a control character"
+    if _device_stem(part) in _DOS_DEVICE_NAMES:
+        return "is a reserved device name on Windows"
+    if ":" in part:
+        return "is alternate-data-stream syntax on Windows"
+    forbidden = sorted(_WINDOWS_FORBIDDEN.intersection(part))
+    if forbidden:
+        return (
+            "contains " + repr("".join(forbidden))
+            + ", which cannot appear in a Windows filename"
+        )
+    if part[-1] in " .":
+        return "has a trailing dot or space, which Windows strips"
+    return None
+
+
 def _check_member_name(name: str, *, container: str) -> None:
-    """Refuse an archive member whose path Windows would not treat as a file.
+    """Refuse an archive member whose path Windows would not store faithfully.
 
     Containment is not enough. `within` answers "does this land under the
-    destination", and a member called `NUL` or `document.txt:payload` does -- but
-    tarfile then opens a DOS device or an NTFS alternate data stream instead of
-    creating an artifact, so the member is silently discarded or hidden while
-    extraction reports success.
+    destination", and a member called `NUL`, `document.txt:payload` or `a?.txt`
+    does -- but the filesystem then opens a device, creates an alternate data
+    stream, or silently renames it, so the member is discarded, hidden, or
+    collides with another while extraction reports success.
 
-    Checked per component, and on every platform for the same reason
-    `safe_output_name` is: the worker producing the archive and the client
-    unpacking it need not be on the same OS.
+    Checked per component and on every platform, for the same reason
+    `safe_output_name` is: the worker writing the archive and the client unpacking
+    it need not share an OS.
     """
     for part in name.replace("\\", "/").split("/"):
         if not part or part in (".", ".."):
             continue
-        if ":" in part:
+        problem = _windows_component_problem(part)
+        if problem is not None:
             raise ResponseError(
-                f"refusing {container} member {name!r}: "
-                f"{part!r} is alternate-data-stream syntax on Windows"
-            )
-        if _device_stem(part) in _DOS_DEVICE_NAMES:
-            raise ResponseError(
-                f"refusing {container} member {name!r}: "
-                f"{part!r} is a reserved device name on Windows"
+                f"refusing {container} member {name!r}: {part!r} {problem}"
             )
 
 
@@ -318,12 +353,9 @@ def safe_output_name(name: str, *, what: str) -> str:
     # are reserved with any extension (`aux.txt`) and the behaviour does not
     # depend on this process running on Windows, because the caller writing the
     # file might be.
-    forbidden = sorted(_WINDOWS_FORBIDDEN.intersection(name))
-    if forbidden:
-        raise ResponseError(
-            f"refusing {what} {name!r}: contains {''.join(forbidden)!r}, which "
-            f"cannot appear in a Windows filename"
-        )
+    problem = _windows_component_problem(name)
+    if problem is not None:
+        raise ResponseError(f"refusing {what} {name!r}: {problem}")
     try:
         encoded = len(name.encode("utf-8"))
     except UnicodeEncodeError as e:
@@ -531,7 +563,13 @@ def download(url: str) -> bytes:
                 )
             chunks: list[bytes] = []
             total = 0
+            started = time.monotonic()
             while True:
+                if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
+                    raise ResponseError(
+                        f"fetching the archive exceeded "
+                        f"{DOWNLOAD_DEADLINE_SECONDS:.0f}s"
+                    )
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
@@ -610,7 +648,28 @@ def _extract_tar(data: bytes, destination: Path) -> None:
 
     with tar_file as tar:
         try:
-            members = tar.getmembers()
+            # Incremental, not `getmembers()`. That decompresses the whole
+            # stream and materialises every TarInfo before either quota can be
+            # read, so a tiny gzip declaring millions of empty headers exhausts
+            # memory before `len(members)` is even reached. Aborting mid-walk
+            # means the cost of a hostile archive is bounded by the quota rather
+            # than by the archive.
+            members = []
+            declared_total = 0
+            while True:
+                member = tar.next()
+                if member is None:
+                    break
+                members.append(member)
+                if len(members) > MAX_ARCHIVE_MEMBERS:
+                    raise ResponseError(
+                        f"the archive declares over {MAX_ARCHIVE_MEMBERS} members"
+                    )
+                declared_total += member.size
+                if declared_total > MAX_EXTRACTED_BYTES:
+                    raise ResponseError(
+                        f"the archive expands to over {MAX_EXTRACTED_BYTES} bytes"
+                    )
         except (
             tarfile.TarError,
             OSError,
@@ -628,21 +687,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             # Widening only the extraction handler left this case escaping, which
             # is why the fix was verified by reproduction rather than by reading.
             raise ResponseError(f"the archive could not be read: {e}") from e
-        if len(members) > MAX_ARCHIVE_MEMBERS:
-            raise ResponseError(
-                f"the archive declares {len(members)} members, over the "
-                f"{MAX_ARCHIVE_MEMBERS} limit"
-            )
-        # The same expansion cap the zip path has. A compressed tar hides the
-        # ratio just as effectively -- a 541-byte gzip expanding to 50 KB was the
-        # reproduction -- and enforcing this on only one container meant the
-        # protection depended on which format the worker happened to send.
-        declared_total = sum(member.size for member in members)
-        if declared_total > MAX_EXTRACTED_BYTES:
-            raise ResponseError(
-                f"the archive expands to {declared_total} bytes, over the "
-                f"{MAX_EXTRACTED_BYTES}-byte limit"
-            )
+
         for member in members:
             _check_member_name(member.name, container="tar")
             if not (member.isfile() or member.isdir()):
@@ -665,8 +710,29 @@ def _extract_tar(data: bytes, destination: Path) -> None:
                 # archive's own uid/gid, which is what the `data` filter exists
                 # to strip. A crafted response could drop a setuid binary,
                 # especially with a client running as root.
+                # Directories are created here, shallowest first, so each one
+                # inherits from its *own* parent -- a setgid `shared/` passes the
+                # bit to `shared/new/`. A single probe mode applied to every
+                # directory could not do that: it was measured against the
+                # destination, so a directory created under a setgid subdirectory
+                # had that bit chmod'd away by the legacy extractall.
+                for member in sorted(
+                    (m for m in members if m.isdir()), key=lambda m: m.name.count("/")
+                ):
+                    if within(destination, member.name):
+                        made = destination / member.name
+                        try:
+                            made.mkdir(parents=True, exist_ok=True)
+                            member.mode = made.stat().st_mode & 0o7777
+                        except OSError:
+                            member.mode = _directory_mode(destination)
                 directory_mode = _directory_mode(destination)
                 for member in members:
+                    if member.isdir():
+                        # Already carries the mode its parent gave it.
+                        member.uid, member.gid = -1, -1
+                        member.uname, member.gname = "", ""
+                        continue
                     _apply_data_filter_mode(member, directory_mode)
                 tar.extractall(destination, members=members)  # noqa: S202
         except (

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -1452,3 +1453,92 @@ def test_the_directory_mode_keeps_an_inherited_setgid_bit(tmp_path: Path) -> Non
     mode = responses._directory_mode(shared)
     assert mode & 0o2000, "the inherited setgid bit was discarded"
     assert not list(shared.iterdir()), "the probe must clean up after itself"
+
+
+# --- Round eighteen: one filename rule, incremental quotas, a deadline -------
+
+
+def test_members_windows_would_collapse_together_are_refused(tmp_path: Path) -> None:
+    """The P1. Windows rewrites both `a?.txt` and `a*.txt` to `a_.txt`, so an
+    archive carrying both has one silently overwrite the other while extraction
+    reports success.
+
+    The gap was not the missing characters, it was that `_check_member_name` was
+    written as a fresh, narrower copy of a rule `safe_output_name` already had --
+    so `a?.txt` was refused as an output name and accepted as a member.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a?.txt", "first")
+        archive.writestr("a*.txt", "second")
+    with pytest.raises(ResponseError, match="Windows filename"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name", ["a?.txt", "NUL", "doc:ads", "trailing.", "trailing ", "a|b.txt"]
+)
+def test_one_rule_answers_for_both_callers(name: str, tmp_path: Path) -> None:
+    """The invariant the fix establishes: a name unusable as an output is also
+    unusable as a member. Asserted as agreement rather than as two lists, since
+    two lists is exactly what drifted."""
+    assert responses._windows_component_problem(name) is not None
+    with pytest.raises(ResponseError):
+        safe_output_name(name, what="a basename")
+    with pytest.raises(ResponseError):
+        extract(_tar_of([name]), tmp_path)
+
+
+def test_the_reason_given_is_the_most_specific_one() -> None:
+    """`NUL.` is a device name that also ends in a dot; the device reason is the
+    useful one, so the checks are ordered most specific first."""
+    assert "device name" in (responses._windows_component_problem("NUL.") or "")
+    assert "trailing dot" in (responses._windows_component_problem("report.") or "")
+
+
+def test_tar_quotas_abort_during_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`getmembers()` decompresses the whole stream and materialises every
+    TarInfo before either quota can be read, so a tiny archive declaring millions
+    of headers exhausts memory before `len(members)` is reached. Walking
+    incrementally bounds the cost by the quota instead of by the archive."""
+    monkeypatch.setattr(responses, "MAX_ARCHIVE_MEMBERS", 5)
+    with pytest.raises(ResponseError, match="members"):
+        extract(_tar_of([f"f{i}.txt" for i in range(200)]), tmp_path)
+
+
+def test_the_size_quota_also_aborts_during_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(responses, "MAX_EXTRACTED_BYTES", 500)
+    with pytest.raises(ResponseError, match="expands to"):
+        extract(_tar_of([f"f{i}.txt" for i in range(20)], size=100, mode="w:gz"), tmp_path)
+
+
+def test_a_download_that_never_finishes_hits_the_deadline(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The socket timeout bounds idle time and is reset by every successful read,
+    so a peer trickling bytes can hold the call open indefinitely without ever
+    approaching the byte cap."""
+    monkeypatch.setattr(responses, "DOWNLOAD_DEADLINE_SECONDS", 0.05)
+
+    class _Trickle:
+        headers: dict[str, str] = {}
+
+        def read(self, size: int = -1) -> bytes:
+            time.sleep(0.02)
+            return b"x"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        responses, "_opener", lambda: type("O", (), {"open": lambda *a, **k: _Trickle()})()
+    )
+    with pytest.raises(ResponseError, match="exceeded"):
+        download("https://example.com/trickle.tar")
