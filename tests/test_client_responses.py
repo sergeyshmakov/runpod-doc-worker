@@ -1738,20 +1738,36 @@ def test_a_tar_parent_component_is_resolved_rather_than_removed(
 ) -> None:
     """The other half of the same rule, which a single canonical form gets wrong.
 
-    In a tar `a/../b.txt` lands at `b.txt`, so it does *not* collide with
-    `a/b.txt` -- and refusing that pair would reject an archive that extracts
-    perfectly well. Applying the tar rule to both containers would have swapped
-    one false negative for one false positive.
+    In a tar `a/../b.txt` resolves to `b.txt`, so it does *not* collide with
+    `a/b.txt`, and reporting that pair would be a false positive. Applying the tar
+    rule to both containers would have traded one false negative for one.
+
+    Asserted on the check rather than end to end, and the first version of this did
+    the latter -- which passed on Windows and failed on every Linux interpreter.
+    `tarfile` does not normalise a member's name, so it tries to create the literal
+    parent directory `a/..`: Windows resolves that to the destination and finds it
+    already there, while on POSIX `a` does not exist yet, so `makedirs` creates it
+    and then fails on the destination. Whether such a member extracts is a
+    platform question about `tarfile`; whether it collides is this module's, and
+    conflating the two is what made the test wrong.
+
+    The end-to-end call is still made, for the one thing it can say portably: the
+    outcome stays inside the error contract either way.
     """
+    responses._check_member_collisions(["a/../b.txt", "a/b.txt"], container="tar")
+
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
         for name in ("a/../b.txt", "a/b.txt"):
             info = tarfile.TarInfo(name)
             info.size = 0
             tar.addfile(info, io.BytesIO(b""))
-    extract(buffer.getvalue(), tmp_path)
+    try:
+        extract(buffer.getvalue(), tmp_path)
+    except ResponseError:
+        # POSIX: `tarfile` cannot create `a/..`. Contained, which is the contract.
+        return
     assert (tmp_path / "b.txt").is_file()
-    assert (tmp_path / "a" / "b.txt").is_file()
 
 
 def test_a_zip_parent_component_is_removed_rather_than_resolved(
