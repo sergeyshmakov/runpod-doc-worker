@@ -18,9 +18,37 @@ from runpod_doc_worker.obs import probe_limits
 from runpod_doc_worker.obs.dirwalk import _is_dir, _scan
 from runpod_doc_worker.obs.model_cache import (
     _hub_cache_path,
+    _newest,
     _resolve_snapshot_path,
+    _snapshot_names,
+    find_model_dir,
     find_model_dirs,
 )
+from runpod_doc_worker.obs.probe_limits import (
+    PROBE_MAX_DEPTH,
+    PROBE_MAX_ENTRIES,
+    PROBE_MAX_MATCHES,
+    PROBE_MAX_SNAPSHOTS,
+    PROBE_MAX_VISITS,
+)
+
+# Declared, not incidental. Most of the names above are re-exported from the
+# modules this one was split into, and an import with no local use is exactly what
+# an unused-import autofix deletes -- which is how `find_model_dir` briefly stopped
+# existing here, after being named in the README and the reference docs since the
+# first release. `__all__` says the export is the point.
+__all__ = [
+    "PROBE_MAX_DEPTH",
+    "PROBE_MAX_ENTRIES",
+    "PROBE_MAX_MATCHES",
+    "PROBE_MAX_SNAPSHOTS",
+    "PROBE_MAX_VISITS",
+    "collect_gpu_info",
+    "find_model_dir",
+    "find_model_dirs",
+    "list_directory",
+    "probe_filesystem",
+]
 
 
 def collect_gpu_info() -> dict[str, Any]:
