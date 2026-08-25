@@ -9,7 +9,6 @@ metacharacters came from the caller -- and neither is about the manifest.
 from __future__ import annotations
 
 import glob as _glob
-import os
 from pathlib import Path
 
 from runpod_doc_worker import paths as _paths

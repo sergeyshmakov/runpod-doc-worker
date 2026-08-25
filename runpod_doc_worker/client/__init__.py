@@ -16,31 +16,22 @@ from __future__ import annotations
 from runpod_doc_worker.client.archives import extract
 from runpod_doc_worker.client.errors import ResponseError
 from runpod_doc_worker.client.fetch import download, require_fetchable_url
-from runpod_doc_worker.client.limits import (
-    DOWNLOAD_DEADLINE_SECONDS,
-    DOWNLOAD_TIMEOUT_SECONDS,
-    MAX_ARCHIVE_BYTES,
-    MAX_ARCHIVE_MEMBERS,
-    MAX_EXTRACTED_BYTES,
-    MAX_METADATA_BYTES,
-    MAX_OUTPUT_NAME_BYTES,
-)
+# The module, not its values. Exporting the numbers made
+# `client.MAX_ARCHIVE_BYTES = bigger` look like the documented way to raise a cap
+# while changing nothing: the readers go through `limits`, so the assignment
+# landed on this package and the original number stayed in force. A caller who
+# followed the public surface got silence instead of a larger allowance.
+from runpod_doc_worker.client import limits
 from runpod_doc_worker.client.names import safe_output_name, within
 from runpod_doc_worker.client.payloads import decode_b64
 
 __all__ = [
-    "DOWNLOAD_DEADLINE_SECONDS",
-    "DOWNLOAD_TIMEOUT_SECONDS",
-    "MAX_ARCHIVE_BYTES",
-    "MAX_ARCHIVE_MEMBERS",
-    "MAX_EXTRACTED_BYTES",
-    "MAX_METADATA_BYTES",
-    "MAX_OUTPUT_NAME_BYTES",
     "ResponseError",
     "decode_b64",
     "download",
     "extract",
     "require_fetchable_url",
     "safe_output_name",
+    "limits",
     "within",
 ]

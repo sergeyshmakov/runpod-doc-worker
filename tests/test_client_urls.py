@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import socket
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +13,7 @@ from runpod_doc_worker.client import (
     ResponseError,
     download,
     fetch,
+    limits,
     require_fetchable_url,
 )
 
@@ -189,3 +192,87 @@ def test_the_opener_records_connections_only_when_given_somewhere_to_put_them(
     recording = {type(h).__name__ for h in fetch._opener({}).handlers}
     assert "_RecordingHTTPSHandler" in recording
     assert "_RecordingHTTPHandler" in recording
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user%0d%0aX:y@example.com/a.tar",
+        "http://user%00:y@example.com/a.tar",
+        "https://%09host@example.com/a.tar",
+    ],
+)
+def test_a_percent_encoded_control_character_in_userinfo_is_refused(url: str) -> None:
+    """`encode("ascii")` accepts CR and LF, so asking whether the decoded authority
+    *encodes* is the wrong question -- it has to be printable.
+
+    The leading check sees only the `%` escapes and passes, and urllib then refuses
+    the request while building the header. A public "is this fetchable" helper that
+    answers yes to something unfetchable defeats every caller who checks first,
+    which is the only reason to have the helper.
+    """
+    with pytest.raises(ResponseError, match="control character"):
+        require_fetchable_url(url)
+
+
+def test_an_ordinary_percent_encoded_userinfo_still_passes() -> None:
+    """The guard: percent-encoding in userinfo is legal and common. Refusing all of
+    it would trade an unfetchable-URL bug for a rejection of working ones."""
+    require_fetchable_url("http://user%40name:pass%21@example.com/a.tar")
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1", "::1"],
+)
+def test_a_connection_to_a_private_address_is_refused(address: str) -> None:
+    """The URL comes from a worker response, so the address it reaches is the
+    worker's choice.
+
+    Loopback, the cloud metadata service at 169.254.169.254, and the private
+    ranges are all reachable from a typical client, and a scheme-and-syntax check
+    accepts every one of them. Judged on the connected socket rather than on the
+    hostname, because a name can answer publicly when checked and privately when
+    dialled -- and a pre-flight lookup cannot see that.
+    """
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    port = 443 if ":" in address else 80
+
+    class _Peer:
+        def getpeername(self):  # noqa: ANN202
+            return (address, port) if family == socket.AF_INET else (address, port, 0, 0)
+
+    with pytest.raises(ResponseError, match="not a routable public address"):
+        fetch._refuse_unroutable(_Peer(), f"http://{address}/a.tar")
+
+
+def test_a_public_address_is_allowed() -> None:
+    class _Peer:
+        def getpeername(self):  # noqa: ANN202
+            return ("93.184.216.34", 80)
+
+    fetch._refuse_unroutable(_Peer(), "http://example.com/a.tar")
+
+
+def test_the_operator_can_allow_a_private_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that really does serve from a private network is the case the flag
+    exists for. Without it the only way past this would be not using `download`."""
+    monkeypatch.setattr(limits, "ALLOW_PRIVATE_FETCH_TARGETS", True)
+
+    class _Peer:
+        def getpeername(self):  # noqa: ANN202
+            return ("10.0.0.1", 80)
+
+    fetch._refuse_unroutable(_Peer(), "http://10.0.0.1/a.tar")
+
+
+def test_the_check_is_installed_on_every_hop_not_just_the_first() -> None:
+    """A redirect builds its own connection through the same handler, so the guard
+    has to live where connections are made rather than in `download`. Asserted
+    structurally: the wrap is on `connect`, which every hop calls."""
+    source = Path(fetch.__file__).read_text(encoding="utf-8")
+    assert "connection.connect = checked_connect" in source, (
+        "the routability check must be installed per connection, not per download"
+    )

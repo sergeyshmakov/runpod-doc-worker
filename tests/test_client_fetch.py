@@ -61,11 +61,17 @@ class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
         """Silence the default stderr access log."""
 
 
-def test_a_truncated_download_is_refused() -> None:
+def test_a_truncated_download_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A server closing before its declared Content-Length raises
     `http.client.IncompleteRead` from `read()`. It is an HTTPException rather
     than an OSError, so the interrupted-download case — the most ordinary
     network failure there is — escaped every handler in `download`."""
+    # Loopback, which the routability guard refuses by default. This is the
+    # case `ALLOW_PRIVATE_FETCH_TARGETS` exists for, so the test sets it rather
+    # than working around it.
+    monkeypatch.setattr(limits, "ALLOW_PRIVATE_FETCH_TARGETS", True)
     server = socketserver.TCPServer(("127.0.0.1", 0), _TruncatingHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -336,6 +342,10 @@ def test_a_timed_out_fetch_really_releases_its_connection(
     same code passes on Windows regardless, so this is checked in the Linux
     matrix.
     """
+    # Loopback, which the routability guard refuses by default. This is the
+    # case `ALLOW_PRIVATE_FETCH_TARGETS` exists for, so the test sets it rather
+    # than working around it.
+    monkeypatch.setattr(limits, "ALLOW_PRIVATE_FETCH_TARGETS", True)
     monkeypatch.setattr(limits, "DOWNLOAD_DEADLINE_SECONDS", 0.4)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

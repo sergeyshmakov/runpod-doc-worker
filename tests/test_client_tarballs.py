@@ -239,3 +239,103 @@ def test_there_is_one_place_that_opens_a_tar() -> None:
     assert source.count("tarfile.open(") == 1, (
         "every tar must be opened through _open_tar, which installs the bound"
     )
+
+
+def test_the_metadata_budget_is_cumulative_not_only_per_header() -> None:
+    """A hundred thousand members each just under the per-header cap is a hundred
+    gigabytes, and none of it is transient: `tarfile` retains every `TarInfo` it
+    has produced until enumeration ends.
+
+    So the per-header limit bounded the wrong quantity, and the archive that
+    defeats it is the ordinary one with many members rather than an exotic single
+    header.
+    """
+    budget = tarballs._MetadataBudget()
+    chunk = limits.MAX_METADATA_BYTES // 2
+    spent = 0
+    with pytest.raises(ResponseError, match="metadata in total"):
+        for _ in range(10_000):
+            budget.charge(chunk)
+            spent += chunk
+    assert spent <= limits.MAX_TOTAL_METADATA_BYTES + chunk, (
+        "the budget must trip at its limit, not well past it"
+    )
+
+
+def test_an_ordinary_archive_is_nowhere_near_the_metadata_budget() -> None:
+    """The guard. A PAX header exists to carry a long path, so a realistic archive
+    spends kilobytes here -- refusing one would be worse than the bug."""
+    budget = tarballs._MetadataBudget()
+    for _ in range(1000):
+        budget.charge(4096)
+    assert budget.spent < limits.MAX_TOTAL_METADATA_BYTES
+
+
+def test_each_archive_gets_its_own_budget() -> None:
+    """Carried on the archive object rather than a module global, so two
+    concurrent extractions cannot spend each other's allowance."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("doc.md")
+        info.size = 0
+        tar.addfile(info, io.BytesIO(b""))
+    data = buffer.getvalue()
+    first = tarballs._open_tar(data)
+    second = tarballs._open_tar(data)
+    try:
+        assert first._runpod_metadata_budget is not second._runpod_metadata_budget
+    finally:
+        first.close()
+        second.close()
+
+
+def test_many_sub_limit_metadata_blocks_are_refused_through_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end, because the unit tests on the budget do not prove it is wired.
+
+    Disabling the charge left every budget test passing -- they call `charge`
+    directly -- so this drives a real archive whose headers are each far under the
+    per-header cap and whose total is over the budget. That is the shape the
+    finding described: an ordinary archive with many members, rather than one
+    exotic header.
+    """
+    monkeypatch.setattr(limits, "MAX_TOTAL_METADATA_BYTES", 64 * 1024)
+    parts = []
+    for index in range(40):
+        value = b"x" * 4096
+        records = b"%d path=%s\n" % (
+            len(b" path=\n") + len(str(len(value))) + len(value),
+            value,
+        )
+        header = tarfile.TarInfo(f"pax{index}")
+        header.type = tarfile.XHDTYPE
+        header.size = len(records)
+        member = tarfile.TarInfo(f"doc{index}.md")
+        member.size = 0
+        parts.append(
+            header.tobuf(tarfile.GNU_FORMAT)
+            + records
+            + b"\0" * ((-len(records)) % 512)
+            + member.tobuf(tarfile.GNU_FORMAT)
+        )
+    payload = b"".join(parts) + b"\0" * 1024
+    with pytest.raises(ResponseError, match="metadata in total"):
+        extract(payload, tmp_path)
+
+
+def test_an_archive_within_the_metadata_budget_still_extracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard on the above: the same shape, under the budget, has to work. A
+    long path is stored in a PAX header, so this is what a real archive of deeply
+    nested documents looks like."""
+    monkeypatch.setattr(limits, "MAX_TOTAL_METADATA_BYTES", 1024 * 1024)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for index in range(20):
+            info = tarfile.TarInfo("/".join(["directory"] * 10) + f"/doc{index}.md")
+            info.size = 4
+            tar.addfile(info, io.BytesIO(b"text"))
+    extract(buffer.getvalue(), tmp_path)
+    assert list(tmp_path.rglob("doc0.md"))

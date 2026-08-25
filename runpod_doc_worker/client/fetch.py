@@ -8,6 +8,7 @@ cap for one that is neither slow nor idle but endless.
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import socket
 import threading
 import urllib.error
@@ -85,12 +86,24 @@ def require_fetchable_url(url: str) -> None:
     # UnicodeEncodeError from inside urlopen. Checking one component of a string
     # that gets decoded in several places is a check in the wrong place.
     try:
-        unquote(parts.netloc, errors="strict").encode("ascii")
+        decoded = unquote(parts.netloc, errors="strict")
+        decoded.encode("ascii")
     except (UnicodeDecodeError, UnicodeEncodeError) as e:
         raise ResponseError(
             f"refusing to fetch {url!r}: the authority is not ASCII once "
             f"percent-decoded"
         ) from e
+    # Printable, not merely encodable. `encode("ascii")` accepts CR and LF, so
+    # `http://user%0d%0aX:y@example.com/` passed here -- the leading check sees
+    # only the `%` escapes, and this one asked the wrong question about the
+    # decoded result. urllib then refuses it while building the header, which
+    # makes a public "is this fetchable" helper answer yes to something that is
+    # not, and defeats every caller that checks before fetching.
+    if any(character < " " or character == "\x7f" for character in decoded):
+        raise ResponseError(
+            f"refusing to fetch {url!r}: the authority decodes to a control "
+            f"character"
+        )
 
 
 class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -107,6 +120,41 @@ class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         require_fetchable_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _refuse_unroutable(sock: socket.socket | None, url: str) -> None:
+    """Refuse a connection that landed on an address a client should not reach.
+
+    Read off the connected socket rather than resolved from the hostname. A name
+    can answer with a public address when it is checked and a private one when it
+    is dialled -- classic DNS rebinding -- so the only address worth judging is
+    the one the connection actually reached. `getpeername()` is that address.
+
+    `is_global` covers loopback, link-local (169.254.0.0/16, where the cloud
+    metadata service lives), the private ranges, multicast and the reserved
+    blocks in one predicate, and it is in the standard library, which this
+    subpackage is restricted to.
+    """
+    if limits.ALLOW_PRIVATE_FETCH_TARGETS or sock is None:
+        return
+    try:
+        peer = sock.getpeername()
+    except OSError:  # pragma: no cover - already gone
+        return
+    if not isinstance(peer, tuple) or not peer:
+        return
+    try:
+        address = ipaddress.ip_address(peer[0])
+    except ValueError:  # pragma: no cover - a unix socket, not our concern
+        return
+    if address.is_global:
+        return
+    raise ResponseError(
+        f"refusing to fetch {url!r}: it connects to {address}, which is not a "
+        f"routable public address. Set "
+        f"runpod_doc_worker.client.limits.ALLOW_PRIVATE_FETCH_TARGETS = True if "
+        f"this worker really does serve from a private network."
+    )
 
 
 class _ConnectionRecorder:
@@ -132,6 +180,19 @@ class _ConnectionRecorder:
         def build(host, **connection_args):
             connection = http_class(host, **connection_args)
             self._sink["connection"] = connection
+            # Wrap `connect` so the address check runs for this hop and every
+            # redirect, since each one builds its own connection through here.
+            # Checking in `download` would cover the first hop only.
+            original_connect = getattr(connection, "connect", None)
+            if callable(original_connect):
+
+                def checked_connect() -> None:
+                    original_connect()
+                    _refuse_unroutable(
+                        getattr(connection, "sock", None), req.full_url
+                    )
+
+                connection.connect = checked_connect
             return connection
 
         return super().do_open(build, req, **kwargs)

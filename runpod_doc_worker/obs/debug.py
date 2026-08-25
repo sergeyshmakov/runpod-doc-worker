@@ -18,9 +18,9 @@ from runpod_doc_worker.obs import probe_limits
 from runpod_doc_worker.obs.dirwalk import _is_dir, _scan
 from runpod_doc_worker.obs.model_cache import (
     _hub_cache_path,
-    _newest,
+    _newest,  # noqa: F401 - re-exported; consumers patch it through this module
     _resolve_snapshot_path,
-    _snapshot_names,
+    _snapshot_names,  # noqa: F401 - re-exported for the same reason
     find_model_dir,
     find_model_dirs,
 )

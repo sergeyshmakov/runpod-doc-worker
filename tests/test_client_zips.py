@@ -262,16 +262,34 @@ def test_an_ordinary_zip_still_extracts_after_the_preflight(tmp_path: Path) -> N
 
 
 @pytest.mark.filterwarnings("ignore:Duplicate name:UserWarning")
-def test_the_same_name_twice_is_not_a_collision(tmp_path: Path) -> None:
-    """A zip may legitimately carry the same name twice; that is a duplicate, not
-    a case collision, and `ZipFile` already has a warning for it. Refusing it here
-    would reject archives that work."""
+def test_the_same_name_twice_is_a_collision(tmp_path: Path) -> None:
+    """A zip may carry one name twice, and extracting it still loses a payload.
+
+    This reverses an earlier decision here, which was to allow it: a duplicate
+    name is legal, `ZipFile` warns about it, and refusing it would reject archives
+    that extract. All of that is true and the conclusion was wrong. Extraction
+    writes one file, so the first member's contents are gone with nothing said --
+    and "does not lose data quietly" is the property every other check in this
+    module exists to hold. Legal and lossless are different questions, and the
+    exemption answered the first one.
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("doc.md", "first")
         archive.writestr("doc.md", "second")
-    extract(buffer.getvalue(), tmp_path)
-    assert (tmp_path / "doc.md").is_file()
+    with pytest.raises(ResponseError, match="twice"):
+        extract(buffer.getvalue(), tmp_path)
+
+
+def test_two_members_with_one_name_are_named_in_the_refusal(tmp_path: Path) -> None:
+    """The message distinguishes the two cases, because they read differently to
+    whoever has to act on it: one name twice, versus two spellings of one name."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Report.txt", "first")
+        archive.writestr("report.txt", "second")
+    with pytest.raises(ResponseError, match="members .* and .*same file"):
+        extract(buffer.getvalue(), tmp_path)
 
 
 def test_a_lying_entry_count_does_not_bypass_the_quota(

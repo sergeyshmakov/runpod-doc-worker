@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 from runpod_doc_worker.client import (
     ResponseError,
     extract,
+    limits,
     names,
     safe_output_name,
     within,
@@ -330,3 +332,46 @@ def test_a_tar_parent_component_is_resolved_rather_than_removed(
         # POSIX: `tarfile` cannot create `a/..`. Contained, which is the contract.
         return
     assert (tmp_path / "b.txt").is_file()
+
+
+def test_the_caps_are_reachable_only_through_their_module() -> None:
+    """Exporting the numbers made `client.MAX_ARCHIVE_BYTES = bigger` look like the
+    documented way to raise a cap while changing nothing -- the readers go through
+    `limits`, so the assignment landed on the package and the original number
+    stayed in force. Silence in response to following the public surface.
+
+    The module is exported instead, which is the one place an assignment works.
+    """
+    import runpod_doc_worker.client as package
+
+    assert "limits" in package.__all__
+    for name in (
+        "MAX_ARCHIVE_BYTES",
+        "MAX_EXTRACTED_BYTES",
+        "MAX_ARCHIVE_MEMBERS",
+        "MAX_METADATA_BYTES",
+        "DOWNLOAD_TIMEOUT_SECONDS",
+    ):
+        assert name not in package.__all__, (
+            f"{name} must not be exported as a detached value; assigning it on the "
+            f"package would silently do nothing"
+        )
+        assert hasattr(package.limits, name)
+
+
+def test_raising_a_cap_on_the_limits_module_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The behaviour the docstring promises, asserted rather than described."""
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 1)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.txt", "")
+        archive.writestr("b.txt", "")
+    with pytest.raises(ResponseError, match="over"):
+        extract(buffer.getvalue(), Path(tempfile.mkdtemp()))
+
+    monkeypatch.setattr(limits, "MAX_ARCHIVE_MEMBERS", 100)
+    destination = Path(tempfile.mkdtemp())
+    extract(buffer.getvalue(), destination)
+    assert (destination / "a.txt").is_file()

@@ -40,6 +40,14 @@ MAX_ARCHIVE_MEMBERS = 100_000
 # a size no real header would.
 MAX_METADATA_BYTES = 1024 * 1024
 
+# And the total across every member. The per-header cap bounds one allocation;
+# this bounds the archive. A hundred thousand members each just under the header
+# cap is a hundred gigabytes, and `tarfile` retains every parsed `TarInfo` until
+# enumeration finishes, so none of it is transient. 64 MiB is far more metadata
+# than any real archive carries -- a PAX header exists to hold a long path, and
+# 64 MiB is sixteen thousand of them at PATH_MAX.
+MAX_TOTAL_METADATA_BYTES = 64 * 1024 * 1024
+
 # The member types whose declared size is metadata to be read into memory rather
 # than file contents to be written out. Looked up rather than written as literals
 # so a name this `tarfile` does not have is simply absent instead of raising at
@@ -63,6 +71,18 @@ _TAR_METADATA_TYPES = frozenset(
     )
     if value is not None
 )
+
+# Whether a fetch may reach a private, loopback or link-local address.
+#
+# On by default, because the URL comes from a worker response and the caller is
+# usually a machine with a metadata service at 169.254.169.254 and services on
+# loopback. A worker that can name those can make its client read them.
+#
+# An operator whose worker legitimately serves from a private network turns this
+# off, which is the case the flag exists for -- there is no allowlist because a
+# hostname allowlist does not survive rebinding and an address allowlist is what
+# the operator's own network already expresses.
+ALLOW_PRIVATE_FETCH_TARGETS = False
 
 # Filesystems bound a path component in bytes, and 255 is the limit on ext4,
 # APFS and NTFS alike. Checked in bytes rather than characters because the charset

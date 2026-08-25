@@ -133,10 +133,21 @@ def _check_member_collisions(names: list[str], *, container: str) -> None:
         if not key:
             continue
         first = seen.get(key)
-        if first is not None and first != name:
+        if first is not None:
+            # Including when the two names are byte-identical. An earlier version
+            # exempted that case, reasoning that a duplicate name is legal in a
+            # zip and that refusing it would reject archives which extract. Both
+            # halves are true and the conclusion was still wrong: extraction
+            # writes one file, so the first member's payload is gone, and this
+            # module's whole contract is that a response does not lose data
+            # quietly. "Legal" and "lossless" are different questions.
+            detail = (
+                f"member {name!r} twice"
+                if first == name
+                else f"members {first!r} and {name!r}"
+            )
             raise ResponseError(
-                f"refusing {container} members {first!r} and {name!r}: "
-                f"they resolve to the same file"
+                f"refusing {container} {detail}: they resolve to the same file"
             )
         seen[key] = name
 

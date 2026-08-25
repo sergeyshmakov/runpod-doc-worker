@@ -20,6 +20,34 @@ from runpod_doc_worker.client.names import (
 )
 
 
+class _MetadataBudget:
+    """How much metadata one archive may spend in total, not per header.
+
+    The per-header limit bounds a single allocation. It does not bound the sum:
+    a hundred thousand members, each with a PAX value just under the cap, is a
+    hundred gigabytes -- and the parsed values are not transient, because
+    `tar.next()` keeps every `TarInfo` it has produced until enumeration ends. So
+    the earlier fix bounded the wrong quantity and the archive that exploits it is
+    the ordinary one with many members.
+
+    Reset per extraction rather than per process, since the budget is a property
+    of the response being read.
+    """
+
+    __slots__ = ("spent",)
+
+    def __init__(self) -> None:
+        self.spent = 0
+
+    def charge(self, size: int) -> None:
+        self.spent += size
+        if self.spent > limits.MAX_TOTAL_METADATA_BYTES:
+            raise ResponseError(
+                f"refusing the archive: its members declare over "
+                f"{limits.MAX_TOTAL_METADATA_BYTES} bytes of metadata in total"
+            )
+
+
 class _BoundedTarInfo(tarfile.TarInfo):
     """A member whose metadata is bounded *before* it is read.
 
@@ -41,11 +69,16 @@ class _BoundedTarInfo(tarfile.TarInfo):
     """
 
     def _proc_member(self, archive):
-        if self.type in limits._TAR_METADATA_TYPES and self.size > limits.MAX_METADATA_BYTES:
-            raise ResponseError(
-                f"refusing tar member metadata of {self.size} bytes, over the "
-                f"{limits.MAX_METADATA_BYTES}-byte limit"
-            )
+        if self.type in limits._TAR_METADATA_TYPES:
+            if self.size > limits.MAX_METADATA_BYTES:
+                raise ResponseError(
+                    f"refusing tar member metadata of {self.size} bytes, over "
+                    f"the {limits.MAX_METADATA_BYTES}-byte limit"
+                )
+            # And against the running total, before the read rather than after.
+            budget = getattr(archive, "_runpod_metadata_budget", None)
+            if budget is not None:
+                budget.charge(self.size)
         return super()._proc_member(archive)
 
 
@@ -64,7 +97,13 @@ def _open_tar(data: bytes) -> tarfile.TarFile:
     this review, and the answer is the same: one producer, so the next thing added
     here cannot apply to one caller and miss the other.
     """
-    return tarfile.open(fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo)
+    archive = tarfile.open(
+        fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo
+    )
+    # Carried on the archive rather than in a module global, so two concurrent
+    # extractions cannot spend each other's budget.
+    archive._runpod_metadata_budget = _MetadataBudget()
+    return archive
 
 
 def _looks_like_tar(data: bytes) -> bool:

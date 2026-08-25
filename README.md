@@ -30,6 +30,13 @@ runpod-doc-worker[s3] @ https://github.com/sergeyshmakov/runpod-doc-worker/archi
 Extras: `s3` for the S3 transport (boto3), `test` for the suite. Drop the
 `[s3]` if the worker only returns tarballs or inline payloads.
 
+**Minimum Python is 3.10.12.** Not 3.10: `tarfile` gained the `data` extraction
+filter in that patch release (June 2023), and the response reader depends on it
+outright rather than carrying a hand-written copy of its permission rules. Pip
+refuses the install below it, which is the intended behaviour — a worker whose
+archive extraction silently applied different rules would be worse. Anything on
+3.10.0–3.10.11 needs a patch upgrade, not a code change.
+
 ## What a worker declares
 
 Two things, both data:
