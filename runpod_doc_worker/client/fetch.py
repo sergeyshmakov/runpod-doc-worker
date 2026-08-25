@@ -122,6 +122,41 @@ class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _refuse_unroutable_origin(host: str, url: str) -> None:
+    """Refuse a *requested* origin that resolves anywhere non-routable.
+
+    Used when a proxy carries the request. The socket then connects to the proxy,
+    so the peer address answers a question nobody asked: a public proxy asked to
+    fetch `http://169.254.169.254/` was approved because the *proxy* is public,
+    and a private corporate proxy was refused for every public target because the
+    proxy is private. Both wrong, in opposite directions.
+
+    Every address the name resolves to has to pass, not merely the first: a name
+    answering with one public and one private address would otherwise depend on
+    resolver ordering.
+
+    This is weaker than the direct check and unavoidably so. With a proxy the
+    client never sees the address the request actually reaches, so a name that
+    resolves differently for the proxy defeats this -- the proxy is the trust
+    boundary at that point, which is what choosing to route through one means.
+    """
+    try:
+        resolved = socket.getaddrinfo(host, None)
+    except OSError as e:
+        raise ResponseError(
+            f"refusing to fetch {url!r}: {host} could not be resolved: {e}"
+        ) from e
+    for entry in resolved:
+        address = ipaddress.ip_address(entry[4][0])
+        if not address.is_global:
+            raise ResponseError(
+                f"refusing to fetch {url!r}: {host} resolves to {address}, which "
+                f"is not a routable public address. Set "
+                f"runpod_doc_worker.client.limits.ALLOW_PRIVATE_FETCH_TARGETS = "
+                f"True if this worker really does serve from a private network."
+            )
+
+
 def _refuse_unroutable(sock: socket.socket | None, url: str) -> None:
     """Refuse a connection that landed on an address a client should not reach.
 
@@ -187,10 +222,23 @@ class _ConnectionRecorder:
             if callable(original_connect):
 
                 def checked_connect() -> None:
+                    # Which address to judge depends on who the socket reaches.
+                    # Through a proxy it reaches the proxy, so the peer address
+                    # says nothing about the target -- the requested origin has to
+                    # be judged instead, before the request is sent.
+                    tunnelled = getattr(connection, "_tunnel_host", None)
+                    proxied = tunnelled is not None or req.has_proxy()
+                    if proxied and not limits.ALLOW_PRIVATE_FETCH_TARGETS:
+                        target = tunnelled or urlsplit(req.full_url).hostname
+                        if target:
+                            _refuse_unroutable_origin(
+                                target.split(":")[0], req.full_url
+                            )
                     original_connect()
-                    _refuse_unroutable(
-                        getattr(connection, "sock", None), req.full_url
-                    )
+                    if not proxied:
+                        _refuse_unroutable(
+                            getattr(connection, "sock", None), req.full_url
+                        )
 
                 connection.connect = checked_connect
             return connection

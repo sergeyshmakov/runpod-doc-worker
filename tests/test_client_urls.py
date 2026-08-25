@@ -276,3 +276,76 @@ def test_the_check_is_installed_on_every_hop_not_just_the_first() -> None:
     assert "connection.connect = checked_connect" in source, (
         "the routability check must be installed per connection, not per download"
     )
+
+
+def test_a_proxied_request_judges_the_target_not_the_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through a proxy the socket reaches the proxy, so its address answers a
+    question nobody asked.
+
+    A public proxy asked for `http://169.254.169.254/` was approved because the
+    proxy is public; a private corporate proxy was refused for every public target
+    for the mirror-image reason. Both wrong, in opposite directions, and neither
+    visible from the peer address.
+    """
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("169.254.169.254", 80))],
+    )
+    with pytest.raises(ResponseError, match="not a routable public address"):
+        fetch._refuse_unroutable_origin("metadata.example", "http://metadata.example/")
+
+
+def test_a_proxied_request_to_a_public_target_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction: a private proxy must not make every public fetch fail."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80))],
+    )
+    fetch._refuse_unroutable_origin("example.com", "http://example.com/a.tar")
+
+
+def test_every_resolved_address_has_to_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not merely the first. A name answering with one public and one private
+    address would otherwise depend on resolver ordering, which is not a security
+    boundary."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [
+            (2, 1, 6, "", ("93.184.216.34", 80)),
+            (2, 1, 6, "", ("127.0.0.1", 80)),
+        ],
+    )
+    with pytest.raises(ResponseError, match="not a routable public address"):
+        fetch._refuse_unroutable_origin("split.example", "http://split.example/")
+
+
+def test_a_name_that_does_not_resolve_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused rather than allowed through. A resolution failure is not evidence
+    that the target is safe, and the fetch would fail immediately afterwards
+    anyway -- with a worse message."""
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("no such host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    with pytest.raises(ResponseError, match="could not be resolved"):
+        fetch._refuse_unroutable_origin("nowhere.invalid", "http://nowhere.invalid/")
+
+
+def test_the_direct_path_still_judges_the_socket() -> None:
+    """The guard: without a proxy the peer address is the right thing to judge, and
+    it is the only one that survives DNS rebinding. The proxy branch must not
+    replace it."""
+    source = Path(fetch.__file__).read_text(encoding="utf-8")
+    assert "if not proxied:" in source, (
+        "the socket check must still run when no proxy is involved"
+    )
