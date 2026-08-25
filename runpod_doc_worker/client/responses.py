@@ -113,6 +113,37 @@ MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 100_000
 
+# A tar member's *metadata* -- a PAX record block or a GNU long-name block -- as
+# opposed to its contents, which `MAX_EXTRACTED_BYTES` covers. One mebibyte is
+# roughly 250 times the longest path any mainstream filesystem accepts, so this
+# does not constrain a real archive; what it constrains is a header that declares
+# a size no real header would.
+MAX_METADATA_BYTES = 1024 * 1024
+
+# The member types whose declared size is metadata to be read into memory rather
+# than file contents to be written out. Looked up rather than written as literals
+# so a name this `tarfile` does not have is simply absent instead of raising at
+# import; `SOLARIS_XHDTYPE` is the one that has moved.
+#
+# `GNUTYPE_SPARSE` is deliberately *not* here. Its `size` is the file's own data
+# length, not a metadata block, so bounding it would refuse a large sparse member
+# that extracts perfectly well -- the kind of false positive that comes from
+# grouping by "reads something" instead of by what the number means.
+_TAR_METADATA_TYPES = frozenset(
+    value
+    for value in (
+        getattr(tarfile, name, None)
+        for name in (
+            "XHDTYPE",
+            "XGLTYPE",
+            "SOLARIS_XHDTYPE",
+            "GNUTYPE_LONGNAME",
+            "GNUTYPE_LONGLINK",
+        )
+    )
+    if value is not None
+)
+
 # Reserved on Windows with any extension, and `open()` on one succeeds while
 # discarding the data.
 _DOS_DEVICE_NAMES = frozenset(
@@ -184,6 +215,35 @@ def _windows_component_problem(part: str) -> str | None:
     if part[-1] in " .":
         return "has a trailing dot or space, which Windows strips"
     return None
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """A member whose metadata is bounded *before* it is read.
+
+    `tar.next()` processes a PAX extended header or a GNU long-name block on the
+    way to the member it describes: it reads the whole declared size into memory
+    and returns the real member afterwards. Both quotas below run on what `next()`
+    returns, so neither had happened yet -- a 10 KB gzip could make one call
+    materialise a 10 MB value while the only member it announced had size zero,
+    and the size field is twelve octal digits, so far larger is expressible. The
+    failure then arrives as a bare `MemoryError`, outside this module's one-error
+    contract.
+
+    Bounding it after the fact is no bound at all, since the allocation is the
+    harm. So the check happens in `_proc_member`, which is where `tarfile`
+    dispatches on the member type and therefore the one place ahead of all three
+    metadata readers. Guarding `_proc_pax` alone would have left the two GNU
+    long-name types reachable -- the same "fixed one of the call sites" shape that
+    has come back as a finding six times in this review.
+    """
+
+    def _proc_member(self, archive):
+        if self.type in _TAR_METADATA_TYPES and self.size > MAX_METADATA_BYTES:
+            raise ResponseError(
+                f"refusing tar member metadata of {self.size} bytes, over the "
+                f"{MAX_METADATA_BYTES}-byte limit"
+            )
+        return super()._proc_member(archive)
 
 
 def _canonical_member(name: str, *, container: str) -> str:
@@ -687,7 +747,9 @@ def _extract_tar(data: bytes, destination: Path) -> None:
     default-filter deprecation.
     """
     try:
-        tar_file = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+        tar_file = tarfile.open(
+            fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo
+        )
     except (
         tarfile.TarError,
         OSError,

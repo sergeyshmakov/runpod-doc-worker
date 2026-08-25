@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from runpod_doc_worker.client.responses import MAX_METADATA_BYTES
+
 from runpod_doc_worker.client import responses
 from runpod_doc_worker.client import (
     ResponseError,
@@ -1607,6 +1609,69 @@ def test_a_timed_out_fetch_closes_its_response(
 
 
 # --- Round twenty-four: container semantics, ZIP64 stubs, header stalls ------
+
+
+def _metadata_header(member_type: bytes, size: int, name: str) -> bytes:
+    """A tar header announcing ``size`` bytes of metadata, and no payload.
+
+    The payload is deliberately absent: the guard fires on the declared size
+    before anything is read, so a fixture that actually carried the bytes would be
+    proving the opposite of what is under test -- that this code can allocate
+    them.
+    """
+    info = tarfile.TarInfo(name)
+    info.type = member_type
+    info.size = size
+    return info.tobuf(tarfile.GNU_FORMAT)
+
+
+@pytest.mark.parametrize(
+    ("member_type", "name"),
+    [
+        (tarfile.XHDTYPE, "pax_header"),
+        (tarfile.XGLTYPE, "pax_global_header"),
+        (tarfile.GNUTYPE_LONGNAME, "././@LongLink"),
+        (tarfile.GNUTYPE_LONGLINK, "././@LongLink"),
+    ],
+)
+def test_oversized_member_metadata_is_refused(
+    tmp_path: Path, member_type: bytes, name: str
+) -> None:
+    """`tar.next()` reads a metadata block whole before returning the member it
+    describes, so both quotas ran too late to matter: a tiny compressed archive
+    could make one call allocate megabytes while announcing an empty file, and a
+    large enough one exhausts memory and leaks a raw `MemoryError`.
+
+    All four metadata types, not just the PAX pair the finding named -- they share
+    one dispatch point and therefore one guard.
+    """
+    payload = _metadata_header(member_type, MAX_METADATA_BYTES + 1, name)
+    with pytest.raises(ResponseError, match="metadata"):
+        extract(payload, tmp_path)
+
+
+def test_a_sparse_member_is_not_treated_as_metadata() -> None:
+    """A GNU sparse member's declared size is its file length, not a metadata
+    block, so bounding it would refuse a large member that extracts perfectly
+    well. Grouping by "reads something" rather than by what the number means is
+    how a guard like this acquires a false positive."""
+    assert tarfile.GNUTYPE_SPARSE not in responses._TAR_METADATA_TYPES
+
+
+def test_a_long_path_carried_in_pax_metadata_still_extracts(tmp_path: Path) -> None:
+    """The limit is 250 times the longest path a mainstream filesystem accepts, so
+    a genuine PAX header -- which is how any path over 100 bytes is stored at all
+    -- has to pass. A bound that refused those would break ordinary archives."""
+    long_name = "/".join(["directory"] * 12) + "/report.md"
+    assert len(long_name) > 100, "the fixture must actually need a PAX header"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo(long_name)
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"text"))
+    extract(buffer.getvalue(), tmp_path)
+    assert (tmp_path / long_name).read_bytes() == b"text"
+
 
 
 def test_extraction_delegates_the_permission_rules_to_the_stdlib(
