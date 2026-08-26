@@ -22,7 +22,12 @@ name = "runpod-doc-worker"
 version = "0.5.0"
 description = "Engine-agnostic harness for RunPod serverless document-processing workers"
 readme = "README.md"
-requires-python = ">=3.10"
+# 3.10.12, not 3.10: `tarfile`'s `filter="data"` arrived in that patch
+# release (June 2023) and the client's archive extraction depends on it
+# outright. The alternative was carrying a hand-written copy of the filter's
+# permission rules for eleven superseded patch versions, which is what this
+# project did until that copy had produced six separate review findings.
+requires-python = ">=3.10.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Sergei Shmakov" }]
 keywords = ["runpod", "serverless", "document-parsing", "ocr", "worker"]
@@ -59,6 +64,9 @@ packages = ["runpod_doc_worker"]
 [tool.hatch.build.targets.sdist]
 include = [
     "runpod_doc_worker/**",
+    # The client distribution's source, so a tag tarball carries both and the
+    # `#subdirectory=client` install works from the same URL.
+    "client/**",
     "README.md",
     "pyproject.toml",
 ]

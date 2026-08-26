@@ -28,6 +28,86 @@ Changing a default, renaming a variable, or making a function raise where it
 previously returned is a compatibility change. Security hardening can be
 breaking too; safer behavior is not automatically a refactor or a patch.
 
+## Two APIs that have each cost a consumer a bug
+
+Both are documented in `transport/net.py`, and both are listed here because the
+docstring is not where someone looks before reaching for the obvious name.
+
+- **For any URL that came from a job payload, call `net.check_target`.** It is the
+  complete check: shape *and* address policy, in one call. `require_http_url` is
+  the shape half alone, and two consumers independently shipped an SSRF by using
+  it by itself on a URL they then handed to an engine. `file_url` is the exception
+  — `CheckedTargetTransport` applies the policy at connect time, so a worker that
+  only fetches through the harness inherits it.
+- **`require_http_url` returns the host, not the URL.** It reads like a validator
+  that passes its input through. Assigning its result back over the URL replaces
+  the whole URL with a bare hostname, which a consumer did.
+
+When adding a check with a partial and a complete form, make the complete one the
+obvious name, or say plainly in both docstrings which is which.
+
+**And do not give a new function one of these names.** The client half validates
+URLs too, and its helper is `require_fetchable_url` — raising on refusal,
+returning nothing — precisely so it is not a same-named sibling of
+`net.require_http_url` with a different contract. Two of those, one import apart,
+would have turned a documented trap into an ambient one. Both docstrings say
+which is which; leave the asymmetry in the names.
+
+## The client half
+
+`runpod_doc_worker.client` is the one subpackage that does not run inside a
+worker: it is for code that talks *to* one. It exists because consumers each
+carried their own copy of archive extraction, output naming, and payload decoding,
+and the copies drifted — a fix in one never reached the identical sites in
+another.
+
+Two constraints on it:
+
+- **Standard library only, and no imports from the rest of this package.** A
+  client package depends on it to read a response; it must not pull a worker's
+  transport stack into an end user's environment. A test asserts that importing it
+  loads no httpx, httpcore, boto3, or anyio.
+- **One error type.** Everything raises `ResponseError`, so a consumer wraps these
+  calls in a single `except` and nothing arrives at user code as a raw stdlib
+  exception. A new function that can fail belongs in that contract too.
+
+## Never mark a change breaking on your own
+
+**Do not put `!` in a commit title, and do not write a `BREAKING CHANGE:` footer,
+without explicit approval from the maintainer.** Ask first, in plain words, and
+let them decide.
+
+This repo runs semantic-release on `main`. A `!` is not a note for readers — it
+is an instruction to cut a **major version** and publish it, with no further
+gate. An agent that adds one has decided the version number and shipped it. That
+matters more here than in a consumer repo, because a major version of this
+package is a migration imposed on every worker built on it.
+
+That happened in a consumer repo. A per-job SSRF hardening was committed as
+`fix(schema)!:` because it did reverse documented and tested behaviour — a
+defensible thing to *propose*. It reached the release branch and published a
+**major version** for four bug fixes and one hardening change, and reversing it
+meant deleting a published Release and tag and force-pushing the branch. The
+opt-in flag that would have made it a patch already existed.
+
+So when a change might break a consumer — a renamed or removed export, a default
+that flips, a helper that starts rejecting input it used to accept — **stop and
+ask**. Describe what breaks and for whom, and offer the alternatives: ship it as
+breaking, put the new behaviour behind an opt-in so nothing breaks, or drop it.
+Whether a change is worth a major version is the maintainer's call every time.
+The checklist below is how you prepare that question — not a licence to answer it
+yourself.
+
+Two related rules, learned the same day:
+
+- Never replay a PR branch's commits onto `origin/main` to reword them. Rebuild
+  onto the branch's own base commit, and check
+  `git merge-base --is-ancestor <new-head> origin/main` **fails** before pushing.
+  Making a PR's commits reachable from `main` is a merge whatever it is called,
+  and here a merge is a release.
+- `git diff old new` being empty does not make a force-push safe. It says the
+  content is unchanged; it says nothing about where the commits now sit.
+
 ## Before changing a public contract
 
 1. State the old behavior, proposed behavior, affected consumers, and why the

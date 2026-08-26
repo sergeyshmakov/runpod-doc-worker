@@ -30,6 +30,13 @@ runpod-doc-worker[s3] @ https://github.com/sergeyshmakov/runpod-doc-worker/archi
 Extras: `s3` for the S3 transport (boto3), `test` for the suite. Drop the
 `[s3]` if the worker only returns tarballs or inline payloads.
 
+**Minimum Python is 3.10.12.** Not 3.10: `tarfile` gained the `data` extraction
+filter in that patch release (June 2023), and the response reader depends on it
+outright rather than carrying a hand-written copy of its permission rules. Pip
+refuses the install below it, which is the intended behaviour — a worker whose
+archive extraction silently applied different rules would be worse. Anything on
+3.10.0–3.10.11 needs a patch upgrade, not a code change.
+
 ## What a worker declares
 
 Two things, both data:
@@ -71,6 +78,25 @@ because the prefix comes from the worker rather than from here.
 | `contract.artifacts` | the manifest a worker declares its outputs with |
 | `contract.degraded` | what a response says when it could not carry all of them |
 | `testing.hub` | hub.json checks a worker repo runs in its own suite |
+
+## The client distribution
+
+`runpod-doc-client` is a second distribution built from `client/` in this repo,
+for code that *calls* a worker rather than being one: archive extraction, output
+naming, bounded downloads, strict base64.
+
+```
+runpod-doc-client @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.6.0.tar.gz#subdirectory=client
+```
+
+It is separate because a client should not install the worker's transport stack
+to read a response. Depending on `runpod-doc-worker` brings httpx, httpcore and
+anyio whether anything imports them or not — the worker side subclasses types
+from httpx and httpcore for its checked-target transport. Lazy imports keep those
+out of `sys.modules`; only a separate distribution keeps them out of the image.
+
+Neither distribution depends on the other. The worker does not import the client
+half, and the client imports nothing outside the standard library.
 
 ## Licence
 
