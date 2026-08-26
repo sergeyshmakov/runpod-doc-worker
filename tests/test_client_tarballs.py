@@ -8,7 +8,6 @@ import tarfile
 from pathlib import Path
 
 import pytest
-
 from runpod_doc_client import (
     ResponseError,
     archives,
@@ -20,6 +19,7 @@ from runpod_doc_client import (
     zips,
 )
 from runpod_doc_client.limits import MAX_METADATA_BYTES
+
 from tests.client_fixtures import (
     _metadata_header,
 )
@@ -339,3 +339,67 @@ def test_an_archive_within_the_metadata_budget_still_extracts(
             tar.addfile(info, io.BytesIO(b"text"))
     extract(buffer.getvalue(), tmp_path)
     assert list(tmp_path.rglob("doc0.md"))
+
+
+def test_metadata_before_the_first_member_is_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`tarfile.open` reads the first real member inside the constructor.
+
+    It recursively consumes every metadata header ahead of that member on the way,
+    so a budget attached to the *returned* object was never charged for any of
+    them -- an archive could put unbounded metadata before its first file and the
+    limit added to stop exactly that was inert there. The budget now rides on a
+    per-call `TarInfo` subclass, which is the only channel open while
+    `TarFile.__init__` is still running.
+    """
+    monkeypatch.setattr(limits, "MAX_TOTAL_METADATA_BYTES", 32 * 1024)
+    parts = []
+    for index in range(40):
+        value = b"x" * 4096
+        records = b"%d path=%s\n" % (
+            len(b" path=\n") + len(str(len(value))) + len(value),
+            value,
+        )
+        header = tarfile.TarInfo(f"pax{index}")
+        header.type = tarfile.XHDTYPE
+        header.size = len(records)
+        parts.append(
+            header.tobuf(tarfile.GNU_FORMAT)
+            + records
+            + b"\0" * ((-len(records)) % 512)
+        )
+    member = tarfile.TarInfo("doc.md")
+    member.size = 0
+    payload = b"".join(parts) + member.tobuf(tarfile.GNU_FORMAT) + b"\0" * 1024
+    with pytest.raises(ResponseError, match="metadata in total"):
+        extract(payload, tmp_path)
+
+
+def test_a_global_header_is_bounded_more_tightly_than_a_member_one(
+    tmp_path: Path,
+) -> None:
+    """A global PAX header's keys are copied into every member that follows.
+
+    `_apply_pax_info` puts the whole dictionary on each `TarInfo`, and enumeration
+    retains them all -- so its real cost is its size times the member count. A few
+    kilobytes becomes gigabytes across a hundred thousand empty members while
+    every individual header stays under both other limits, which is why this one
+    is separate and much smaller.
+    """
+    value = b"y" * (limits.MAX_GLOBAL_METADATA_BYTES + 4096)
+    records = b"%d comment=%s\n" % (
+        len(b" comment=\n") + len(str(len(value))) + len(value),
+        value,
+    )
+    header = tarfile.TarInfo("pax_global_header")
+    header.type = tarfile.XGLTYPE
+    header.size = len(records)
+    payload = (
+        header.tobuf(tarfile.GNU_FORMAT)
+        + records
+        + b"\0" * ((-len(records)) % 512)
+        + b"\0" * 1024
+    )
+    with pytest.raises(ResponseError, match="global tar header"):
+        extract(payload, tmp_path)

@@ -48,6 +48,14 @@ class _MetadataBudget:
             )
 
 
+# The global-header types, whose keys every later member inherits.
+_TAR_GLOBAL_TYPES = frozenset(
+    value
+    for value in (getattr(tarfile, name, None) for name in ("XGLTYPE",))
+    if value is not None
+)
+
+
 class _BoundedTarInfo(tarfile.TarInfo):
     """A member whose metadata is bounded *before* it is read.
 
@@ -75,8 +83,23 @@ class _BoundedTarInfo(tarfile.TarInfo):
                     f"refusing tar member metadata of {self.size} bytes, over "
                     f"the {limits.MAX_METADATA_BYTES}-byte limit"
                 )
+            # A global header is charged far more tightly than a per-member one.
+            # `_apply_pax_info` copies the whole global dictionary into every
+            # `TarInfo` that follows, and `next()` retains them all -- so a few
+            # kilobytes of global keys becomes gigabytes across a hundred thousand
+            # empty members while every individual header stays under both limits.
+            # The retained cost is the product, and only the global side is
+            # knowable here.
+            if self.type in _TAR_GLOBAL_TYPES and self.size > limits.MAX_GLOBAL_METADATA_BYTES:
+                raise ResponseError(
+                    f"refusing a global tar header of {self.size} bytes, over "
+                    f"the {limits.MAX_GLOBAL_METADATA_BYTES}-byte limit: its keys "
+                    f"are copied into every member that follows"
+                )
             # And against the running total, before the read rather than after.
-            budget = getattr(archive, "_runpod_metadata_budget", None)
+            budget = getattr(self, "_runpod_budget", None)
+            if budget is None:
+                budget = getattr(archive, "_runpod_metadata_budget", None)
             if budget is not None:
                 budget.charge(self.size)
         return super()._proc_member(archive)
@@ -97,12 +120,22 @@ def _open_tar(data: bytes) -> tarfile.TarFile:
     this review, and the answer is the same: one producer, so the next thing added
     here cannot apply to one caller and miss the other.
     """
-    archive = tarfile.open(
-        fileobj=io.BytesIO(data), mode="r:*", tarinfo=_BoundedTarInfo
-    )
-    # Carried on the archive rather than in a module global, so two concurrent
+    # The budget is carried on a per-call subclass, not attached afterwards.
+    # `tarfile.open` reads the first real member inside the constructor, which
+    # recursively consumes every metadata header before it -- so a budget attached
+    # to the returned object was never charged for any of them, and an archive
+    # could put unbounded metadata ahead of its first file. A class attribute is
+    # the only channel available while `TarFile.__init__` is still running.
+    #
+    # A fresh subclass per call rather than a module global, so two concurrent
     # extractions cannot spend each other's budget.
-    archive._runpod_metadata_budget = _MetadataBudget()
+    budget = _MetadataBudget()
+
+    class _Bounded(_BoundedTarInfo):
+        _runpod_budget = budget
+
+    archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*", tarinfo=_Bounded)
+    archive._runpod_metadata_budget = budget
     return archive
 
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from runpod_doc_worker import config as _config
-from runpod_doc_worker.obs import probe_limits
+from runpod_doc_worker.obs import model_cache, probe_limits
 from runpod_doc_worker.obs.dirwalk import _is_dir, _scan
 from runpod_doc_worker.obs.model_cache import (
     _hub_cache_path,
@@ -68,20 +68,31 @@ class _Module(types.ModuleType):
     """
 
     def __setattr__(self, name: str, value: object) -> None:
-        if name in _FORWARDED_LIMITS:
-            setattr(probe_limits, name, value)
+        target = _FORWARDED.get(name)
+        if target is not None:
+            setattr(target, name, value)
         super().__setattr__(name, value)
 
 
-_FORWARDED_LIMITS = frozenset(
-    {
-        "PROBE_MAX_DEPTH",
-        "PROBE_MAX_ENTRIES",
-        "PROBE_MAX_MATCHES",
-        "PROBE_MAX_SNAPSHOTS",
-        "PROBE_MAX_VISITS",
-    }
-)
+# Every re-exported name, and the module that actually reads it. The limits were
+# forwarded first; the helpers were not, and a consumer patching `debug._newest`
+# -- which this module's own comments promise -- got a binding nothing reads,
+# because `find_model_dir` executes with `model_cache` globals. Fourth instance of
+# one shape, so the mapping is now the whole re-export list rather than the subset
+# that had been reported.
+_FORWARDED = {
+    "PROBE_MAX_DEPTH": probe_limits,
+    "PROBE_MAX_ENTRIES": probe_limits,
+    "PROBE_MAX_MATCHES": probe_limits,
+    "PROBE_MAX_SNAPSHOTS": probe_limits,
+    "PROBE_MAX_VISITS": probe_limits,
+    "_hub_cache_path": model_cache,
+    "_newest": model_cache,
+    "_resolve_snapshot_path": model_cache,
+    "_snapshot_names": model_cache,
+    "find_model_dir": model_cache,
+    "find_model_dirs": model_cache,
+}
 
 sys.modules[__name__].__class__ = _Module
 

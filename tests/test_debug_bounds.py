@@ -124,3 +124,31 @@ def test_lowering_a_probe_limit_through_debug_still_takes_effect() -> None:
     finally:
         debug.PROBE_MAX_VISITS = original
         probe_limits.PROBE_MAX_VISITS = original
+
+
+@pytest.mark.parametrize(
+    "name", ["_newest", "_snapshot_names", "_hub_cache_path", "find_model_dir"]
+)
+def test_patching_a_relocated_helper_through_debug_still_reaches_it(
+    name: str,
+) -> None:
+    """The comments in `debug` promise these are patchable through it.
+
+    They were detached bindings: `find_model_dir` executes with `model_cache`
+    globals, so a consumer patching `debug._newest` replaced something nothing
+    reads. Fourth instance of one shape in this session -- a name read where it
+    used to be assigned -- so the forwarding now covers the whole re-export list
+    rather than the subset that had been reported.
+    """
+    from runpod_doc_worker.obs import debug, model_cache
+
+    original = getattr(model_cache, name)
+    sentinel = object()
+    try:
+        setattr(debug, name, sentinel)
+        assert getattr(model_cache, name) is sentinel, (
+            f"patching debug.{name} must reach the module that reads it"
+        )
+    finally:
+        setattr(debug, name, original)
+        setattr(model_cache, name, original)

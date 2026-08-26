@@ -78,6 +78,25 @@ def _windows_component_problem(part: str) -> str | None:
     return None
 
 
+def _extractor_path(name: str, *, container: str) -> str:
+    """The path the extractor writes, with case preserved.
+
+    The same component handling as :func:`_canonical_member` -- zip removes `..`,
+    tar resolves it -- but without the case folding, because this one is used to
+    build a real path rather than a comparison key.
+    """
+    parts: list[str] = []
+    for part in name.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if container == "tar" and parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
 def _canonical_member(name: str, *, container: str) -> str:
     """The path the extractor will actually write, as a comparison key.
 
@@ -177,11 +196,24 @@ def _check_destination_collisions(
     """
     landed: dict[Path, str] = {}
     for name in names:
-        target = destination / name.replace("\\", "/")
+        # Normalised the way the extractor will, before resolving. Resolving the
+        # raw name let `a/../x.txt` collapse to `destination/x.txt` -- while
+        # `zipfile` drops the `..` and writes `a/x.txt`, which follows a symlinked
+        # `a` to somewhere else entirely. Two members then landed on one file with
+        # this check finding nothing, because it had resolved a path the extractor
+        # never uses.
+        target = destination / _extractor_path(name, container=container)
         try:
             resolved = target.resolve()
-        except OSError:  # pragma: no cover - a path the platform will not resolve
-            continue
+        except (OSError, ValueError, RuntimeError) as e:
+            # ValueError: a PAX header can carry an embedded NUL, and `resolve()`
+            # raises on it -- from a pass that runs before the name checks, so the
+            # raw stdlib exception escaped `extract()` and broke the one-error
+            # contract. RuntimeError is the symlink-loop spelling on some versions.
+            raise ResponseError(
+                f"refusing {container} member {name!r}: its destination cannot be "
+                f"resolved: {e}"
+            ) from e
         first = landed.get(resolved)
         if first is not None and first != name:
             raise ResponseError(

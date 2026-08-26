@@ -48,6 +48,14 @@ MAX_METADATA_BYTES = 1024 * 1024
 # 64 MiB is sixteen thousand of them at PATH_MAX.
 MAX_TOTAL_METADATA_BYTES = 64 * 1024 * 1024
 
+# A *global* PAX header, which is a different quantity again. Its keys are copied
+# into every member parsed after it and retained with them, so its real cost is
+# its size times the member count -- a few kilobytes becomes gigabytes across a
+# hundred thousand members while every individual header stays under both limits
+# above. 64 KiB is generous for a header that exists to carry a handful of
+# archive-wide keys.
+MAX_GLOBAL_METADATA_BYTES = 64 * 1024
+
 # The member types whose declared size is metadata to be read into memory rather
 # than file contents to be written out. Looked up rather than written as literals
 # so a name this `tarfile` does not have is simply absent instead of raising at

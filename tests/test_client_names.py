@@ -9,7 +9,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from runpod_doc_client import (
     ResponseError,
     extract,
@@ -18,6 +17,7 @@ from runpod_doc_client import (
     safe_output_name,
     within,
 )
+
 from tests.client_fixtures import (
     _tar_of,
 )
@@ -401,3 +401,64 @@ def test_an_ordinary_destination_is_unaffected(tmp_path: Path) -> None:
     names._check_member_collisions(
         ["a/x.txt", "b/x.txt"], container="zip", destination=tmp_path
     )
+
+
+def test_a_parent_component_is_normalised_before_the_destination_is_resolved(
+    tmp_path: Path,
+) -> None:
+    """Resolving the raw name answers about a path the extractor never writes.
+
+    `a/../x.txt` collapses to `destination/x.txt` when resolved, while `zipfile`
+    drops the `..` and writes `a/x.txt` -- which follows a symlinked `a` to
+    somewhere else. So two members landed on one file and this check found
+    nothing, having resolved the wrong path.
+    """
+    (tmp_path / "c").mkdir()
+    try:
+        (tmp_path / "a").symlink_to(tmp_path / "c", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need privileges on this platform")
+    with pytest.raises(ResponseError, match="same file once the destination"):
+        names._check_member_collisions(
+            ["a/../x.txt", "c/x.txt"], container="zip", destination=tmp_path
+        )
+
+
+def test_a_name_that_cannot_be_resolved_keeps_the_error_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`resolve()` raises ValueError on a path with an embedded NUL, which a PAX
+    header can supply -- and this pass runs before the name checks, so the raw
+    stdlib exception escaped `extract()`.
+
+    Driven through a patched `resolve` rather than a real NUL, because whether one
+    raises is platform-specific: Linux refuses it, Windows resolves it happily. The
+    contract being asserted is not "a NUL raises" but "whatever `resolve` raises
+    comes out as ResponseError", and that holds on both.
+    """
+
+    def boom(self):  # noqa: ANN001, ANN202
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    with pytest.raises(ResponseError, match="cannot be resolved"):
+        names._check_member_collisions(
+            ["doc.md"], container="tar", destination=tmp_path
+        )
+
+
+def test_a_symlink_loop_also_keeps_the_error_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other spelling: some versions raise RuntimeError for a symlink loop.
+    Both are normalised, since a caller cannot be expected to catch a set of
+    exception types that varies by interpreter."""
+
+    def boom(self):  # noqa: ANN001, ANN202
+        raise RuntimeError("Symlink loop from ...")
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    with pytest.raises(ResponseError, match="cannot be resolved"):
+        names._check_member_collisions(
+            ["doc.md"], container="tar", destination=tmp_path
+        )
