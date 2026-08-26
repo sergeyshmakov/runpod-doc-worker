@@ -1,3 +1,54 @@
+## [0.6.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.5.0...v0.6.0) (2026-08-26)
+
+### Features
+
+* **client:** require 3.10.12 and delete the data-filter emulation ([c44f8bb](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c44f8bba2d9c4893ddb4bb9412ca4f74c3d189c3))
+* **client:** share the response-reading half with consumers ([1dca841](https://github.com/sergeyshmakov/runpod-doc-worker/commit/1dca841e6fd0c6700a20748487d97d9a0aac5ab5))
+* **client:** ship the client half as its own distribution ([ac92805](https://github.com/sergeyshmakov/runpod-doc-worker/commit/ac92805d814a035b880cccda82677e990c9ede82))
+
+### Bug Fixes
+
+* **client:** apply the quotas to tar, check member paths, keep setgid ([2730aba](https://github.com/sergeyshmakov/runpod-doc-worker/commit/2730aba8e129d7f061f0c233c44edd9f1cd339aa))
+* **client:** bound tar detection, shut the socket down, normalise names ([aca7f12](https://github.com/sergeyshmakov/runpod-doc-worker/commit/aca7f1257865362a8604d62c6070a818e790612d))
+* **client:** bound tar member metadata before it is read ([3891a83](https://github.com/sergeyshmakov/runpod-doc-worker/commit/3891a83270f7499c519bd598cca27d84211fcd5b))
+* **client:** canonical member paths, prepended data, a deadline that bounds ([9a19afe](https://github.com/sergeyshmakov/runpod-doc-worker/commit/9a19afefa6fa041c58b376d4b92769a846b947e3))
+* **client:** case collisions, a counted directory, and zstd errors ([306e193](https://github.com/sergeyshmakov/runpod-doc-worker/commit/306e193b9df919d531ae692f401165dce391e510))
+* **client:** charge metadata before the constructor, and four more boundary gaps ([74540c0](https://github.com/sergeyshmakov/runpod-doc-worker/commit/74540c05e8ad21b42cbda751d6e9a544feee706f))
+* **client:** check every redirect hop, and four smaller gaps ([1adb549](https://github.com/sergeyshmakov/runpod-doc-worker/commit/1adb54940d6d83fd3f25bd599e31f844421d0662))
+* **client:** close five leaks in the error boundary, and correct one claim ([b30dd48](https://github.com/sergeyshmakov/runpod-doc-worker/commit/b30dd48f8cf991738f77716f556bb9deb609677f))
+* **client:** close four more boundary gaps, one of them a wrong answer ([756b49e](https://github.com/sergeyshmakov/runpod-doc-worker/commit/756b49e9f9bfef0799d12f6674f2dc519a508534))
+* **client:** close the boundary class, not the four reported instances ([37a010e](https://github.com/sergeyshmakov/runpod-doc-worker/commit/37a010e7500630a2a9571218014d3ac7f9bed630))
+* **client:** container-aware collisions, ZIP64 stubs, header-phase cancellation ([f3c8e4d](https://github.com/sergeyshmakov/runpod-doc-worker/commit/f3c8e4d6491b53e48ccc14f87378ffba1f223b18))
+* **client:** detect the outer container, and bound what a response can cost ([679c293](https://github.com/sergeyshmakov/runpod-doc-worker/commit/679c2938e88bd07944ccfd82b999215d38d6a434))
+* **client:** judge the requested origin when a proxy carries the request ([c8052af](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c8052af04e4f21c908291f494f051ee6c44d4cee))
+* **client:** make the isolation promise real, and close three more type gaps ([ebc047f](https://github.com/sergeyshmakov/runpod-doc-worker/commit/ebc047f1ab8f42a6b504e4318240f0b8b75abfd6))
+* **client:** more zip constructor failures, and strict name encoding ([b4e565a](https://github.com/sergeyshmakov/runpod-doc-worker/commit/b4e565a55c128027e0567f8af27d8b8bb2f3d4eb))
+* **client:** one filename rule, incremental quotas, a download deadline ([77ba730](https://github.com/sergeyshmakov/runpod-doc-worker/commit/77ba730b9bd14e41e58fcf20582b5cc47ce3e9e4))
+* **client:** parent components, ZIP64 offsets, and real cancellation ([2168780](https://github.com/sergeyshmakov/runpod-doc-worker/commit/216878010b1b18f2230c2631af13854c2cb86bd7))
+* **client:** proxied IPv6 origins, symlink aliasing, and a live probe control point ([60ae2ff](https://github.com/sergeyshmakov/runpod-doc-worker/commit/60ae2ffbfa11a6efef04bc496214cbdfe8609463))
+* **client:** rename the URL helper, and guard destination resolution ([c122dd5](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c122dd5baffebca0e76f612e6d6c99134ce7e2de))
+* **client:** repair two tests that were not testing anything, and three defects ([861e4ae](https://github.com/sergeyshmakov/runpod-doc-worker/commit/861e4aea51c1a5690b325a406548b8f5f1f6ecdc))
+* **client:** routability policy, cumulative metadata, duplicate names, cap access ([54d98c6](https://github.com/sergeyshmakov/runpod-doc-worker/commit/54d98c61a080d62c5e95db624335c88c805fc663))
+* **client:** start the deadline before open, preflight the zip entry count ([c4454cb](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c4454cbfb0c1ba5fc24f178e43d2cf40eea7b6e3))
+* **client:** the legacy tar fallback needs a real mode, not None ([200cb17](https://github.com/sergeyshmakov/runpod-doc-worker/commit/200cb17c66fefd23030b280de1ec256d0bc6d9fe))
+* **client:** transcribe the data filter's mode rules, and catch timestamp errors ([8a49c3a](https://github.com/sergeyshmakov/runpod-doc-worker/commit/8a49c3a68615de9b4f5e25300c083aa6d5366aa7))
+* **client:** validate the whole authority, and finish the legacy tar fallback ([6036e25](https://github.com/sergeyshmakov/runpod-doc-worker/commit/6036e2545664564d8fdcc4f784b132220015c931))
+* **client:** zip name decoding, symlink loops, and name length ([c8ced3e](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c8ced3e821be23874ba300061f1fec6961f841c4))
+* **obs:** restore the re-exports the split dropped, and assert the surface ([148156e](https://github.com/sergeyshmakov/runpod-doc-worker/commit/148156ec1280573219a7bc9a8de8ffb6d0d5d23f))
+* **test:** assert the destination mode, not a umask computation ([980a846](https://github.com/sergeyshmakov/runpod-doc-worker/commit/980a846c1042c8a15be475aa35da0b0482ae79ee))
+
+### Refactoring
+
+* bring every file under a 500-line cap, and enforce it ([09c9662](https://github.com/sergeyshmakov/runpod-doc-worker/commit/09c9662aff08123ee9cfe63f31fbc09d67c784d9))
+* **client:** split responses.py into modules under 500 lines ([bda2c69](https://github.com/sergeyshmakov/runpod-doc-worker/commit/bda2c69dcebf9a8870f7579ab81a82265c95d0ef))
+
+### Documentation
+
+* **agents:** describe the consumer generically ([6a5590f](https://github.com/sergeyshmakov/runpod-doc-worker/commit/6a5590f0d3b42f5f31fb711e356ba0f78e616235))
+* **agents:** never mark a change breaking without asking ([ff59acc](https://github.com/sergeyshmakov/runpod-doc-worker/commit/ff59acc383f914eac28536ade04bad3571f49b00))
+* drop review-process narration from comments and docstrings ([8503ea8](https://github.com/sergeyshmakov/runpod-doc-worker/commit/8503ea824a99e20e90094ba80a0686a6c9ef9cd2))
+* **net:** say which URL check is the complete one ([cb9536d](https://github.com/sergeyshmakov/runpod-doc-worker/commit/cb9536db4fefd3ae7c43860d3b4e49e8ddc40d69))
+
 ## [0.5.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.4.0...v0.5.0) (2026-08-21)
 
 ### ⚠ BREAKING CHANGES
