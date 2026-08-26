@@ -11,8 +11,8 @@ from __future__ import annotations
 import unicodedata
 from pathlib import Path
 
-from runpod_doc_worker.client import limits
-from runpod_doc_worker.client.errors import ResponseError
+from runpod_doc_client import limits
+from runpod_doc_client.errors import ResponseError
 
 # Reserved on Windows with any extension, and `open()` on one succeeds while
 # discarding the data.

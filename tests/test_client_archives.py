@@ -9,8 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     archives,
     errors,
@@ -21,7 +20,8 @@ from runpod_doc_worker.client import (
     tarballs,
     zips,
 )
-from runpod_doc_worker.client.limits import MAX_METADATA_BYTES
+from runpod_doc_client.limits import MAX_METADATA_BYTES
+
 from tests.client_fixtures import (
     _oversized_pax_gzip,
     _tar_of,
@@ -72,40 +72,71 @@ def test_a_destination_that_cannot_be_created_is_refused(tmp_path: Path) -> None
 
 
 def test_importing_the_client_does_not_load_worker_modules() -> None:
-    """The promise the client subpackage makes, checked as the rule rather than
-    as a symptom.
+    """The boundary, asserted in a fresh interpreter.
 
-    The previous test looked for *heavy* modules (httpx and friends) and passed,
-    while `import runpod_doc_worker.client` was in fact loading
-    `runpod_doc_worker.config` every time: Python runs the root package
-    initializer first, and that did `from runpod_doc_worker.config import ...`
-    eagerly. A test that asserts the consequence instead of the invariant goes
-    green the moment the invariant breaks in a way that is merely cheap.
+    It used to be a claim about imports only: `runpod_doc_client` was
+    `runpod_doc_worker.client`, so importing it ran the root package initializer
+    and pulled in `runpod_doc_worker.config` every time. Now the two are separate
+    distributions and the invariant is the stronger one -- no `runpod_doc_worker`
+    module is loaded at all, and none is even installed in a client-only
+    environment.
 
-    A subprocess, because `sys.modules` in this one is already polluted by the
-    rest of the suite.
+    Run in a subprocess because this test session has already imported both.
     """
-    probe = (
-        "import sys, runpod_doc_worker.client; "
-        "print('|'.join(sorted(m for m in sys.modules "
-        "if m.startswith('runpod_doc_worker'))))"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", probe],
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, runpod_doc_client; "
+            "print(sorted(m for m in sys.modules if m.startswith('runpod_doc_worker')))",
+        ],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).resolve().parent.parent,
         check=True,
     )
-    loaded = completed.stdout.strip().split("|")
-    strays = [
-        module
-        for module in loaded
-        if module != "runpod_doc_worker"
-        and not module.startswith("runpod_doc_worker.client")
-    ]
-    assert not strays, f"importing the client pulled in worker modules: {strays}"
+    assert result.stdout.strip() == "[]", (
+        f"importing the client loaded worker modules: {result.stdout.strip()}"
+    )
 
+
+def test_the_client_imports_nothing_outside_the_standard_library() -> None:
+    """And the property the separate distribution exists to deliver.
+
+    Lazy imports could keep httpx out of `sys.modules`; only a separate
+    distribution keeps it out of the environment. This checks the first half,
+    which is the part a test can see -- the second is `client/pyproject.toml`
+    declaring no dependencies, asserted below.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, runpod_doc_client; "
+            "print(sorted(m for m in sys.modules "
+            "if m.split('.')[0] in {'httpx', 'httpcore', 'anyio', 'boto3', 'runpod'}))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]", (
+        f"the client pulled in third-party modules: {result.stdout.strip()}"
+    )
+
+
+def test_the_client_distribution_declares_no_dependencies() -> None:
+    """The half no import check can see: what pip installs.
+
+    A consumer depending on `runpod-doc-worker` gets httpx whatever the imports
+    do, because the worker side declares it. This is the line that makes the
+    client's environment lean, so it is the line worth pinning.
+    """
+    manifest = (
+        Path(__file__).resolve().parents[1] / "client" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    assert "dependencies = []" in manifest, (
+        "the client distribution must declare no runtime dependencies"
+    )
 
 def test_the_lazy_root_exports_still_work() -> None:
     """Making the re-exports lazy must not change the worker-side API."""

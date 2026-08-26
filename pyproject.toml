@@ -64,6 +64,9 @@ packages = ["runpod_doc_worker"]
 [tool.hatch.build.targets.sdist]
 include = [
     "runpod_doc_worker/**",
+    # The client distribution's source, so a tag tarball carries both and the
+    # `#subdirectory=client` install works from the same URL.
+    "client/**",
     "README.md",
     "pyproject.toml",
 ]

@@ -11,9 +11,9 @@ import io
 import tarfile
 from pathlib import Path
 
-from runpod_doc_worker.client import limits
-from runpod_doc_worker.client.errors import _DECOMPRESSION_ERRORS, ResponseError
-from runpod_doc_worker.client.names import (
+from runpod_doc_client import limits
+from runpod_doc_client.errors import _DECOMPRESSION_ERRORS, ResponseError
+from runpod_doc_client.names import (
     _check_member_collisions,
     _check_member_name,
     within,

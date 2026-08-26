@@ -44,7 +44,7 @@ PUBLIC = {
         "resolve",
         "validate",
     ),
-    "runpod_doc_worker.client": (
+    "runpod_doc_client": (
         "ResponseError",
         "decode_b64",
         "download",

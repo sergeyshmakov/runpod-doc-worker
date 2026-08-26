@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     download,
     fetch,
@@ -92,7 +92,7 @@ def test_the_client_url_helper_does_not_share_a_name_with_the_worker_one() -> No
     thing would have doubled it, so it is `require_fetchable_url` and the old name
     is not exported.
     """
-    from runpod_doc_worker import client
+    import runpod_doc_client as client
     from runpod_doc_worker.transport import net
 
     assert not hasattr(client, "require_http_url"), "the colliding name is exported"
@@ -135,7 +135,7 @@ def test_a_redirect_to_another_scheme_is_refused() -> None:
     redirecting server, because the check belongs to the handler and this keeps
     the test off the network.
     """
-    from runpod_doc_worker.client.fetch import _CheckedRedirectHandler
+    from runpod_doc_client.fetch import _CheckedRedirectHandler
 
     handler = _CheckedRedirectHandler()
     with pytest.raises(ResponseError, match="expected an http"):
@@ -146,7 +146,7 @@ def test_the_opener_offers_only_http_handlers() -> None:
     """The opener is built explicitly instead of using the module default, whose
     handler set includes FTP and local file access — capabilities this function
     has no use for and cannot safely offer an untrusted URL."""
-    from runpod_doc_worker.client.fetch import _opener
+    from runpod_doc_client.fetch import _opener
 
     names = {type(h).__name__ for h in _opener().handlers}
     assert "FTPHandler" not in names

@@ -10,9 +10,9 @@ import io
 import zipfile
 from pathlib import Path
 
-from runpod_doc_worker.client.errors import _DECOMPRESSION_ERRORS, ResponseError
-from runpod_doc_worker.client.tarballs import _extract_tar, _looks_like_tar
-from runpod_doc_worker.client.zips import _extract_zip
+from runpod_doc_client.errors import _DECOMPRESSION_ERRORS, ResponseError
+from runpod_doc_client.tarballs import _extract_tar, _looks_like_tar
+from runpod_doc_client.zips import _extract_zip
 
 
 def extract(data: bytes, dest_dir: str | Path) -> Path:

@@ -6,7 +6,7 @@ import base64
 
 import pytest
 
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     decode_b64,
 )
@@ -64,7 +64,7 @@ def test_importing_the_client_half_loads_nothing_heavy() -> None:
     import sys
 
     probe = (
-        "import sys; import runpod_doc_worker.client as c; "
+        "import sys; import runpod_doc_client as c; "
         "assert c.decode_b64; "
         "heavy = [m for m in ('httpx', 'httpcore', 'boto3', 'anyio') "
         "         if m in sys.modules]; "

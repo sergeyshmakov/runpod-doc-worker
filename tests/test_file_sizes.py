@@ -84,7 +84,9 @@ def test_no_python_file_exceeds_the_line_cap() -> None:
     )
 
 
-@pytest.mark.parametrize("directory", ["runpod_doc_worker", "tests"])
+@pytest.mark.parametrize(
+    "directory", ["runpod_doc_worker", "client/runpod_doc_client", "tests"]
+)
 def test_the_cap_is_measured_where_the_code_is(directory: str) -> None:
     """Sanity: the discovery actually reaches the two trees that matter. A path
     change that quietly excluded `worker/` would leave the cap passing forever."""

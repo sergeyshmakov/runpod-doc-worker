@@ -15,8 +15,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import unquote, urlsplit
 
-from runpod_doc_worker.client import limits
-from runpod_doc_worker.client.errors import ResponseError, _log
+from runpod_doc_client import limits
+from runpod_doc_client.errors import ResponseError, _log
 
 
 def require_fetchable_url(url: str) -> None:
@@ -152,7 +152,7 @@ def _refuse_unroutable_origin(host: str, url: str) -> None:
             raise ResponseError(
                 f"refusing to fetch {url!r}: {host} resolves to {address}, which "
                 f"is not a routable public address. Set "
-                f"runpod_doc_worker.client.limits.ALLOW_PRIVATE_FETCH_TARGETS = "
+                f"runpod_doc_client.limits.ALLOW_PRIVATE_FETCH_TARGETS = "
                 f"True if this worker really does serve from a private network."
             )
 
@@ -187,7 +187,7 @@ def _refuse_unroutable(sock: socket.socket | None, url: str) -> None:
     raise ResponseError(
         f"refusing to fetch {url!r}: it connects to {address}, which is not a "
         f"routable public address. Set "
-        f"runpod_doc_worker.client.limits.ALLOW_PRIVATE_FETCH_TARGETS = True if "
+        f"runpod_doc_client.limits.ALLOW_PRIVATE_FETCH_TARGETS = True if "
         f"this worker really does serve from a private network."
     )
 

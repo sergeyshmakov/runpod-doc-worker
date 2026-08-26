@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     extract,
     limits,

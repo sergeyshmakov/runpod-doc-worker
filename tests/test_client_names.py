@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     extract,
     limits,
@@ -342,7 +342,7 @@ def test_the_caps_are_reachable_only_through_their_module() -> None:
 
     The module is exported instead, which is the one place an assignment works.
     """
-    import runpod_doc_worker.client as package
+    import runpod_doc_client as package
 
     assert "limits" in package.__all__
     for name in (

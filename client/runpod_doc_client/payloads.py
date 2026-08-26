@@ -11,7 +11,7 @@ import base64
 import binascii
 import re
 
-from runpod_doc_worker.client.errors import ResponseError
+from runpod_doc_client.errors import ResponseError
 
 # Base64 alphabet plus the padding character. Used to report *what* is wrong with
 # a payload rather than only that something is.

@@ -78,7 +78,25 @@ because the prefix comes from the worker rather than from here.
 | `contract.artifacts` | the manifest a worker declares its outputs with |
 | `contract.degraded` | what a response says when it could not carry all of them |
 | `testing.hub` | hub.json checks a worker repo runs in its own suite |
-| `client` | reading a worker's response safely, for code that *calls* a worker — archive extraction, output naming, strict base64. Standard library only |
+
+## The client distribution
+
+`runpod-doc-client` is a second distribution built from `client/` in this repo,
+for code that *calls* a worker rather than being one: archive extraction, output
+naming, bounded downloads, strict base64.
+
+```
+runpod-doc-client @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.6.0.tar.gz#subdirectory=client
+```
+
+It is separate because a client should not install the worker's transport stack
+to read a response. Depending on `runpod-doc-worker` brings httpx, httpcore and
+anyio whether anything imports them or not — the worker side subclasses types
+from httpx and httpcore for its checked-target transport. Lazy imports keep those
+out of `sys.modules`; only a separate distribution keeps them out of the image.
+
+Neither distribution depends on the other. The worker does not import the client
+half, and the client imports nothing outside the standard library.
 
 ## Licence
 

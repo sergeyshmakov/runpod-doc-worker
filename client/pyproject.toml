@@ -1,0 +1,44 @@
+# The client half, as its own distribution.
+#
+# It exists so that a consumer reading a worker's response does not install the
+# worker's transport stack to do it. `runpod-doc-worker` brings httpx, httpcore
+# and anyio because its own transport subclasses types from them; none of that is
+# needed to unpack a tarball and check a filename, and lazy imports could keep
+# those modules out of `sys.modules` but never out of the environment.
+#
+# There is deliberately no dependency between the two distributions in either
+# direction. The worker does not import this package, and this package imports
+# nothing outside the standard library -- which is also what lets both be
+# installed from a tag tarball without either one pinning the other's URL.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "runpod-doc-client"
+version = "0.6.0"
+description = "Read a runpod-doc-worker response safely: archives, filenames, base64."
+readme = "README.md"
+# 3.10.12, not 3.10: `tarfile`'s `filter="data"` arrived in that patch release and
+# the archive extraction here depends on it outright.
+requires-python = ">=3.10.12"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7",
+]
+
+[project.urls]
+Homepage = "https://github.com/sergeyshmakov/runpod-doc-worker"
+
+[tool.hatch.build.targets.wheel]
+packages = ["runpod_doc_client"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "runpod_doc_client/**",
+    "README.md",
+    "pyproject.toml",
+]

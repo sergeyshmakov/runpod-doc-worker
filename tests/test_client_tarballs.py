@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from runpod_doc_worker.client import (
+from runpod_doc_client import (
     ResponseError,
     archives,
     extract,
@@ -19,7 +19,7 @@ from runpod_doc_worker.client import (
     tarballs,
     zips,
 )
-from runpod_doc_worker.client.limits import MAX_METADATA_BYTES
+from runpod_doc_client.limits import MAX_METADATA_BYTES
 from tests.client_fixtures import (
     _metadata_header,
 )
