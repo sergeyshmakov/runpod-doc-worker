@@ -10,6 +10,8 @@ without shelling into a worker.
 from __future__ import annotations
 
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ from runpod_doc_worker.obs.model_cache import (
     find_model_dir,
     find_model_dirs,
 )
-from runpod_doc_worker.obs.probe_limits import (
+from runpod_doc_worker.obs.probe_limits import (  # noqa: F401 - see _Module below
     PROBE_MAX_DEPTH,
     PROBE_MAX_ENTRIES,
     PROBE_MAX_MATCHES,
@@ -49,6 +51,39 @@ __all__ = [
     "list_directory",
     "probe_filesystem",
 ]
+
+
+class _Module(types.ModuleType):
+    """This module, with the probe limits forwarded to where they are read.
+
+    ``debug.PROBE_MAX_VISITS = 10`` used to change what ``find_model_dir`` saw,
+    because the name was defined and read in one place. After the split it is read
+    from ``probe_limits``, so the plain re-export above became a snapshot: an
+    assignment landed here, the scan went on using 2000, and nothing said so.
+
+    Reading is fine through the re-export -- the value only changes by assignment.
+    It is *writing* that has to be forwarded, and a module has no ``__setattr__``
+    hook, so the module's class is replaced with this one. That is the documented
+    way to do it and the only one that keeps the old control point working.
+    """
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _FORWARDED_LIMITS:
+            setattr(probe_limits, name, value)
+        super().__setattr__(name, value)
+
+
+_FORWARDED_LIMITS = frozenset(
+    {
+        "PROBE_MAX_DEPTH",
+        "PROBE_MAX_ENTRIES",
+        "PROBE_MAX_MATCHES",
+        "PROBE_MAX_SNAPSHOTS",
+        "PROBE_MAX_VISITS",
+    }
+)
+
+sys.modules[__name__].__class__ = _Module
 
 
 def collect_gpu_info() -> dict[str, Any]:

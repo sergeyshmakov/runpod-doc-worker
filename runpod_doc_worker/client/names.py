@@ -114,7 +114,9 @@ def _canonical_member(name: str, *, container: str) -> str:
     return unicodedata.normalize("NFC", joined.casefold())
 
 
-def _check_member_collisions(names: list[str], *, container: str) -> None:
+def _check_member_collisions(
+    names: list[str], *, container: str, destination: Path | None = None
+) -> None:
     """Refuse an archive whose member paths collide on a case-insensitive volume.
 
     Windows and macOS default to case-insensitive, so ``Report.txt`` and
@@ -150,6 +152,43 @@ def _check_member_collisions(names: list[str], *, container: str) -> None:
                 f"refusing {container} {detail}: they resolve to the same file"
             )
         seen[key] = name
+
+    if destination is not None:
+        _check_destination_collisions(names, container=container, destination=destination)
+
+
+def _check_destination_collisions(
+    names: list[str], *, container: str, destination: Path
+) -> None:
+    """Refuse members that land on one file because the *destination* aliases them.
+
+    The lexical check above compares the names an archive carries. It cannot see a
+    symlink that already exists where the files are going: with `a -> b` in the
+    destination, `a/x.txt` and `b/x.txt` are two distinct names, two distinct
+    canonical keys, and one file -- so the second silently replaced the first with
+    every lexical rule satisfied.
+
+    Resolved rather than refused outright, because a symlinked output directory is
+    a normal thing for a caller to arrange and refusing all of them would break
+    working setups. What is refused is two members resolving to one path.
+
+    `resolve()` on a path that does not exist yet still resolves the parts that
+    do, which is exactly the aliasing this needs to see.
+    """
+    landed: dict[Path, str] = {}
+    for name in names:
+        target = destination / name.replace("\\", "/")
+        try:
+            resolved = target.resolve()
+        except OSError:  # pragma: no cover - a path the platform will not resolve
+            continue
+        first = landed.get(resolved)
+        if first is not None and first != name:
+            raise ResponseError(
+                f"refusing {container} members {first!r} and {name!r}: they land "
+                f"on the same file once the destination's own links are resolved"
+            )
+        landed[resolved] = name
 
 
 def _check_member_name(name: str, *, container: str) -> None:

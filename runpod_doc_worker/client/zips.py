@@ -146,7 +146,7 @@ def _extract_zip(data: bytes, destination: Path) -> None:
                 f"the archive expands to {declared} bytes, over the "
                 f"{limits.MAX_EXTRACTED_BYTES}-byte limit"
             )
-        _check_member_collisions(archive.namelist(), container="zip")
+        _check_member_collisions(archive.namelist(), container="zip", destination=destination)
         for name in archive.namelist():
             _check_member_name(name, container="zip")
             if not within(destination, name):

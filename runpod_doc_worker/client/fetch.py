@@ -231,9 +231,13 @@ class _ConnectionRecorder:
                     if proxied and not limits.ALLOW_PRIVATE_FETCH_TARGETS:
                         target = tunnelled or urlsplit(req.full_url).hostname
                         if target:
-                            _refuse_unroutable_origin(
-                                target.split(":")[0], req.full_url
-                            )
+                            # Passed through, not split. `urlsplit().hostname`
+                            # has already dropped any port and the brackets from
+                            # an IPv6 literal, so `2606:4700::1111` was being cut
+                            # to `2606` -- which `getaddrinfo` reads as the IPv4
+                            # address 0.0.10.46 and this refuses. Every public
+                            # IPv6 download failed whenever a proxy was set.
+                            _refuse_unroutable_origin(target, req.full_url)
                     original_connect()
                     if not proxied:
                         _refuse_unroutable(

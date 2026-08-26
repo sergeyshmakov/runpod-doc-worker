@@ -349,3 +349,27 @@ def test_the_direct_path_still_judges_the_socket() -> None:
     assert "if not proxied:" in source, (
         "the socket check must still run when no proxy is involved"
     )
+
+
+def test_an_ipv6_origin_survives_the_proxy_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`urlsplit().hostname` has already dropped the port and the brackets.
+
+    Splitting it again on `:` cut `2606:4700:4700::1111` to `2606`, which
+    `getaddrinfo` reads as the IPv4 address 0.0.10.46 -- non-global, so every
+    public IPv6 download was refused whenever a proxy was configured. A regression
+    from the proxy fix in the previous round, introduced by defending against a
+    port that was never there.
+    """
+    seen: list[str] = []
+
+    def fake(host, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        seen.append(host)
+        return [(10, 1, 6, "", ("2606:4700:4700::1111", 443, 0, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+    fetch._refuse_unroutable_origin(
+        "2606:4700:4700::1111", "https://[2606:4700:4700::1111]/a.tar"
+    )
+    assert seen == ["2606:4700:4700::1111"], "the host must be passed through whole"

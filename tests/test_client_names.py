@@ -375,3 +375,29 @@ def test_raising_a_cap_on_the_limits_module_takes_effect(
     destination = Path(tempfile.mkdtemp())
     extract(buffer.getvalue(), destination)
     assert (destination / "a.txt").is_file()
+
+
+def test_a_symlinked_destination_aliases_two_members(tmp_path: Path) -> None:
+    """The lexical check compares names; it cannot see the destination's own links.
+
+    With `a -> b` already present, `a/x.txt` and `b/x.txt` are two names, two
+    canonical keys and one file -- so the second replaced the first with every
+    lexical rule satisfied.
+    """
+    (tmp_path / "b").mkdir()
+    try:
+        (tmp_path / "a").symlink_to(tmp_path / "b", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need privileges on this platform")
+    with pytest.raises(ResponseError, match="same file once the destination"):
+        names._check_member_collisions(
+            ["a/x.txt", "b/x.txt"], container="zip", destination=tmp_path
+        )
+
+
+def test_an_ordinary_destination_is_unaffected(tmp_path: Path) -> None:
+    """The guard: resolving must not refuse two genuinely different members, and a
+    destination with no links in it is the normal case."""
+    names._check_member_collisions(
+        ["a/x.txt", "b/x.txt"], container="zip", destination=tmp_path
+    )

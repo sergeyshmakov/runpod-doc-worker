@@ -101,3 +101,26 @@ def test_a_truncated_hub_scan_is_not_reported_as_absence(tmp_path, monkeypatch):
     finally:
         model_cache.find_model_dir.cache_clear()
         config.reset()
+
+
+def test_lowering_a_probe_limit_through_debug_still_takes_effect() -> None:
+    """`debug.PROBE_MAX_VISITS = 10` used to change what the search read.
+
+    After the split the implementation reads `probe_limits`, so the re-exported
+    name became a snapshot: the assignment landed on `debug`, the scan went on
+    using 2000, and nothing said so. Third instance of one shape -- a name that
+    used to be read where it was assigned is now read somewhere else -- and the
+    only one where the old control point had to keep working, because this module
+    is released and documented.
+    """
+    from runpod_doc_worker.obs import debug, probe_limits
+
+    original = probe_limits.PROBE_MAX_VISITS
+    try:
+        debug.PROBE_MAX_VISITS = 10
+        assert probe_limits.PROBE_MAX_VISITS == 10, (
+            "assigning the re-exported name must reach the module that reads it"
+        )
+    finally:
+        debug.PROBE_MAX_VISITS = original
+        probe_limits.PROBE_MAX_VISITS = original

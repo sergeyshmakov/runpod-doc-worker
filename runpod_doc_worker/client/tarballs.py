@@ -188,7 +188,7 @@ def _extract_tar(data: bytes, destination: Path) -> None:
             # is why the fix was verified by reproduction rather than by reading.
             raise ResponseError(f"the archive could not be read: {e}") from e
 
-        _check_member_collisions([m.name for m in members], container="tar")
+        _check_member_collisions([m.name for m in members], container="tar", destination=destination)
         for member in members:
             _check_member_name(member.name, container="tar")
             if not (member.isfile() or member.isdir()):
