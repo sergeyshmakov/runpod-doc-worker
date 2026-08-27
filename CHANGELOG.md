@@ -1,3 +1,10 @@
+## [0.7.2](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.1...v0.7.2) (2026-08-27)
+
+### Bug Fixes
+
+* **net:** let a caller-supplied URL refuse the local-fetch bypass ([e106c3f](https://github.com/sergeyshmakov/runpod-doc-worker/commit/e106c3f2e6011f9e20f37f3569ced95c142ebdb1))
+* **net:** tell an operator something they can act on, and stop calling file_url operator-owned ([a609974](https://github.com/sergeyshmakov/runpod-doc-worker/commit/a609974bb4a98e0bba0c50a4241a4c08066a8ba5))
+
 ## [0.7.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.0...v0.7.1) (2026-08-27)
 
 ### Bug Fixes
