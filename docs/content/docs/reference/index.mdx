@@ -84,6 +84,26 @@ From `runpod_doc_worker.transport.package`:
 
 Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive formats are `tar.gz` and `zip`.
 
+### Scoping the local-fetch bypass
+
+`<PREFIX>_ALLOW_LOCAL_FETCH` is an **operator's** exemption: it lets the worker
+fetch documents from a private mirror. It is scoped to the whole worker, so without
+care it also exempts every URL a *caller* supplies in a job payload — and a caller
+naming `169.254.169.254` for a model-server field would then reach cloud metadata
+from inside the worker's network.
+
+Pass `allow_local=False` to `check_target`, `resolve_checked` or
+`resolve_checked_host` for any URL that came from a job payload. `None`, the
+default, consults the operator's setting as before.
+
+```python
+# an operator's document mirror keeps its exemption
+net.check_target(file_url, field="file_url")
+
+# a caller-supplied target does not get it
+net.check_target(server_url, field="server_url", allow_local=False)
+```
+
 ## Response size
 
 `runpod_doc_worker.transport.response_size` — refusing a response the gateway would
