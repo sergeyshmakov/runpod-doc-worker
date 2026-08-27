@@ -84,6 +84,34 @@ From `runpod_doc_worker.transport.package`:
 
 Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive formats are `tar.gz` and `zip`.
 
+### Scoping the local-fetch bypass
+
+`<PREFIX>_ALLOW_LOCAL_FETCH` is set by an **operator**, but what it exempts is
+every URL the worker fetches — and those URLs still come from callers. Turning it on
+to reach a private document mirror therefore also lets a caller name
+`169.254.169.254` and be fetched. That is the deliberate trade of the variable, and
+it is why the exemption should reach as few fields as possible.
+
+Pass `allow_local=False` to `check_target`, `resolve_checked` or
+`resolve_checked_host` for any URL you are not prepared to have the bypass cover.
+`None`, the default, consults the operator's setting as before.
+
+```python
+# `file_url` is caller-supplied too. Omitting the override means the operator's
+# bypass, if set, covers it — which is what an endpoint serving its own private
+# mirror wants, and an SSRF hole on an endpoint open to untrusted callers.
+net.check_target(file_url, field="file_url")
+
+# `server_url` names a service rather than a document, so nothing an operator
+# switches on for their mirror should reach it.
+net.check_target(server_url, field="server_url", allow_local=False)
+```
+
+The distinction is not operator-owned versus caller-owned — every job field is
+caller-supplied. It is how much the operator meant to permit when they set the
+variable: fetching documents from their own network, not letting callers choose
+arbitrary internal services.
+
 ## Response size
 
 `runpod_doc_worker.transport.response_size` — refusing a response the gateway would

@@ -54,6 +54,23 @@ def _allow_local_hint() -> str:
     return f"set {_config.active().env_name(ALLOW_LOCAL_FETCH)}=1 to allow this"
 
 
+def _policy_hint(field: str) -> str:
+    """Why setting the env var will not help for this field.
+
+    When a caller passes ``allow_local=False`` the environment is deliberately
+    ignored, so printing "set <PREFIX>_ALLOW_LOCAL_FETCH=1" sends the reader to a
+    switch that cannot work -- they would set it, redeploy, and get the identical
+    error. Naming the field is the actionable part: the fix is to stop sending a
+    private address in it, or to put the host on this worker's allow-list if it
+    has one.
+    """
+    return (
+        f"{field} does not honour "
+        f"{_config.active().env_name(ALLOW_LOCAL_FETCH)}, because its value comes "
+        f"from the caller rather than from this endpoint's configuration"
+    )
+
+
 def require_http_url(url: str, *, field: str) -> str:
     """Return the **host** of ``url``, or raise if it isn't a usable HTTP target.
 
@@ -152,7 +169,13 @@ def _is_routable(addr: str) -> bool:
     return ip.is_global
 
 
-def resolve_checked_host(host: str, port: int | None, *, field: str) -> list[str]:
+def resolve_checked_host(
+    host: str,
+    port: int | None,
+    *,
+    field: str,
+    allow_local: bool | None = None,
+) -> list[str]:
     """Return the addresses ``host`` may be connected to, in resolver order.
 
     Every address is returned, not just the first, because a host with several
@@ -160,34 +183,57 @@ def resolve_checked_host(host: str, port: int | None, *, field: str) -> list[str
     would strand a dual-stack name whose leading record this worker has no
     route to.
 
+    ``allow_local`` overrides the operator's ``ALLOW_LOCAL_FETCH`` setting for this
+    one call; ``None`` consults it as before. Pass ``False`` for a field where the
+    bypass should not reach.
+
+    The bypass exists for *documents*: an operator serving PDFs from a private
+    mirror sets it, and every URL the worker fetches is then exempt. That is the
+    right scope for a document URL an operator chose and the wrong one for a URL a
+    *caller* supplies, and a consumer of this package shipped exactly that hole --
+    with the bypass on, any job could point the worker's model-server field at
+    169.254.169.254 and the address policy said nothing.
+
     Blocking: resolution is a synchronous DNS call.
     """
     addresses = list(dict.fromkeys(_addresses_for(host, port)))
     if not addresses:
         raise ValueError(f"host {host!r} could not be resolved: no addresses returned")
-    if not allow_local_targets():
+    permitted = allow_local_targets() if allow_local is None else allow_local
+    if not permitted:
+        # Which hint depends on *why* the target was refused. With the bypass
+        # merely unset an operator can turn it on; with it refused for this field
+        # they cannot, and saying otherwise costs them a deploy cycle to discover.
+        hint = _allow_local_hint() if allow_local is None else _policy_hint(field)
         for addr in addresses:
             if not _is_routable(addr):
                 raise ValueError(
                     f"{field} must point at a publicly routable host; "
-                    f"{host!r} resolves to {addr} "
-                    f"({_allow_local_hint()})"
+                    f"{host!r} resolves to {addr} ({hint})"
                 )
     return addresses
 
 
-def resolve_checked(url: str, *, field: str) -> list[str]:
-    """Check ``url`` and return the addresses a connection may use."""
+def resolve_checked(
+    url: str, *, field: str, allow_local: bool | None = None
+) -> list[str]:
+    """Check ``url`` and return the addresses a connection may use.
+
+    ``allow_local=False`` refuses the operator's ``ALLOW_LOCAL_FETCH`` bypass for
+    this call — see :func:`resolve_checked_host`.
+    """
     host = require_http_url(url, field=field)
     parts = urlsplit(url)
     try:
         port = parts.port
     except ValueError as e:
         raise ValueError(f"{field} has an invalid port: {url!r}") from e
-    return resolve_checked_host(host, port, field=field)
+    return resolve_checked_host(host, port, field=field, allow_local=allow_local)
 
 
-def check_target(url: str, *, field: str) -> None:
+def check_target(
+    url: str, *, field: str, allow_local: bool | None = None
+) -> None:
     """The complete check for a caller-supplied URL. Raises, or returns None.
 
     Shape *and* address policy: it delegates to :func:`resolve_checked`, which
@@ -201,8 +247,14 @@ def check_target(url: str, *, field: str) -> None:
     the case that needs calling this explicitly, and two consumers of this package
     independently shipped an SSRF by using :func:`require_http_url` alone for
     exactly that.
+
+    ``allow_local=False`` refuses the ``ALLOW_LOCAL_FETCH`` bypass for this call.
+    Use it for any URL a *caller* supplies: the bypass is scoped to the whole
+    worker, so an operator who turns it on for their own document mirror otherwise
+    exempts every caller-supplied URL too, which is how the same consumer shipped
+    the same class of hole twice.
     """
-    resolve_checked(url, field=field)
+    resolve_checked(url, field=field, allow_local=allow_local)
 
 
 class CheckedAddressBackend(httpcore.AnyIOBackend):
