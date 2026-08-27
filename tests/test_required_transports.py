@@ -12,7 +12,7 @@ import pytest
 
 from runpod_doc_worker.contract.artifacts import Artifact, ArtifactError
 from runpod_doc_worker.transport import archive_requirements
-from runpod_doc_worker.transport import package
+from runpod_doc_worker.transport import archive_build, package
 
 
 REQUIRED_MANIFEST = (
@@ -108,7 +108,9 @@ def test_archive_transports_reject_an_unsafe_required_member(
     tmp_path, monkeypatch, transport, archive_format
 ):
     (tmp_path / "doc.md").write_text("# body\n", encoding="utf-8")
-    monkeypatch.setattr(package, "_safe_arcname", lambda name: name != "doc.md")
+    monkeypatch.setattr(
+        archive_build, "_safe_arcname", lambda name: name != "doc.md"
+    )
     call, upload_called = _package(
         transport, tmp_path, monkeypatch, archive_format
     )

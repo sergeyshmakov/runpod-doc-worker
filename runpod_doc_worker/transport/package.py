@@ -24,19 +24,15 @@ rather than only in the log.
 from __future__ import annotations
 
 import base64
-import io
 import os
-import stat
-import tarfile
-import time
-import zipfile
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable
+from typing import Any, Iterable
 
-from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
 from runpod_doc_worker.contract import degraded as _degraded
+from runpod_doc_worker.transport import archive_build as _archive_build
 from runpod_doc_worker.transport import archive_requirements as _requirements
+from runpod_doc_worker.transport import response_size as _response_size
 
 
 # The ways output can be returned. A worker's own schema is what rejects a bad
@@ -60,172 +56,33 @@ def _refuse_reserved(what: str, keys: set[str]) -> None:
         )
 
 
-def _safe_arcname(name: str) -> bool:
-    """Whether ``name`` is safe to write into an archive as a member name.
+# Re-exported: two consumers alias `_build_tarball_bytes` / `_build_zip_bytes` from
+# this module, and the tests reach for `_safe_arcname` and `_build_archive_bytes`.
+# Named in `__all__` so an unused-import autofix cannot decide they are dead --
+# which is exactly how a documented name was lost in this repository once already.
+_archive_members = _archive_build._archive_members
+_build_archive_bytes = _archive_build._build_archive_bytes
+_build_tarball_bytes = _archive_build._build_tarball_bytes
+_build_zip_bytes = _archive_build._build_zip_bytes
+_safe_arcname = _archive_build._safe_arcname
+_zip_info = _archive_build._zip_info
 
-    Containment checks answer where a file *is*; this answers what the archive
-    would *call* it, which is what an extractor acts on. A backslash is a legal
-    character in a POSIX filename, so a file can sit legitimately inside the
-    output directory under a name like ``..\\outside.txt`` — and an extractor
-    that treats backslashes as separators then writes outside its destination.
-
-    Both separator conventions are checked, because the archive is built on one
-    platform and opened on another.
-    """
-    if not name or name in (".", ".."):
-        return False
-    if name.startswith(("/", "\\")):
-        return False
-    # A drive letter or a UNC prefix makes the name absolute on Windows.
-    if len(name) >= 2 and name[1] == ":":
-        return False
-    parts = name.replace("\\", "/").split("/")
-    return not any(part in ("", ".", "..") for part in parts)
-
-
-def _archive_members(
-    output_dir: Path,
-    report: _degraded.Report | None = None,
-    required_members: _requirements.RequiredMembers | None = None,
-) -> list[Path]:
-    """Regular files under ``output_dir`` that stay inside it, in a stable order.
-
-    An entry that escapes is skipped rather than raised on: it is an artefact
-    of how the engine laid out its own directory, and dropping a job over it
-    would be a worse trade than shipping the rest. What was left out goes into
-    ``report``, because an archive missing a file the engine wrote is otherwise
-    indistinguishable from one the engine never wrote it into.
-    """
-    report = _degraded.sink(report)
-    kept: list[Path] = []
-    for child in sorted(output_dir.rglob("*")):
-        what = _paths.kind(child)
-        if what == _paths.UNRESOLVABLE:
-            report.note(reason=_degraded.UNRESOLVABLE, file=child.name)
-            continue
-        where = _paths.relation(output_dir, child)
-        if where != _paths.INSIDE:
-            # Two different problems, and calling the second one an escape sends
-            # a reader hunting a traversal that nothing has evidence of.
-            report.note(
-                reason=(
-                    _degraded.OUTSIDE_OUTPUT_DIR
-                    if where == _paths.OUTSIDE
-                    else _degraded.UNRESOLVABLE
-                ),
-                file=child.name,
-            )
-            continue
-        # Skip only after containment: an ordinary in-tree directory is a
-        # silent non-member, but an outside directory link is reported above.
-        if what == _paths.DIRECTORY:
-            continue
-        if not _safe_arcname(child.relative_to(output_dir).as_posix()):
-            report.note(reason=_degraded.UNSAFE_NAME, file=child.name)
-            continue
-        kept.append(child)
-    _requirements.ensure_included(kept, required_members or {})
-    return kept
-
-
-def _build_tarball_bytes(
-    output_dir: Path,
-    report: _degraded.Report | None = None,
-    required_members: _requirements.RequiredMembers | None = None,
-) -> bytes:
-    """Gzip-tar the engine output dir; returns the raw bytes.
-
-    ``dereference=True`` stores the bytes behind a symlink rather than the link
-    itself. Without it a kept link is archived with its original absolute
-    target, so the tarball extracts to a dangling path — or is refused by an
-    extractor that checks — while the zip of the same output carries the file.
-    A caller should get the same artifacts whichever container they asked for.
-
-    Following links is safe here only because `_archive_members` has already
-    dropped every member that resolves outside the output directory. The two
-    belong together: dereferencing an unfiltered list is how the zip path was
-    leaking in the first place.
-    """
-    report = _degraded.sink(report)
-    required_members = required_members or {}
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
-        for child in _archive_members(output_dir, report, required_members):
-            arcname = child.relative_to(output_dir).as_posix()
-            required = required_members.get(child, ())
-
-            def describe(source: BinaryIO) -> tarfile.TarInfo:
-                info = tar.gettarinfo(fileobj=source, arcname=arcname)
-                if info is None or not info.isreg():
-                    raise IsADirectoryError(f"archive member is not a regular file: {child}")
-                return info
-
-            with _requirements.capture(child, required, report, describe) as snapshot:
-                if snapshot is None:
-                    continue
-                snapshot.metadata.size = snapshot.size
-                tar.addfile(snapshot.metadata, snapshot.data)
-    return buf.getvalue()
-
-
-def _zip_info(source: BinaryIO, arcname: str, child: Path) -> zipfile.ZipInfo:
-    """Describe a regular ZIP member from its already-open source."""
-    source_stat = os.fstat(source.fileno())
-    if not stat.S_ISREG(source_stat.st_mode):
-        raise IsADirectoryError(f"archive member is not a regular file: {child}")
-    info = zipfile.ZipInfo(arcname, time.localtime(source_stat.st_mtime)[:6])
-    info.external_attr = (source_stat.st_mode & 0xFFFF) << 16
-    info.file_size = source_stat.st_size
-    return info
-
-
-def _build_zip_bytes(
-    output_dir: Path,
-    report: _degraded.Report | None = None,
-    required_members: _requirements.RequiredMembers | None = None,
-) -> bytes:
-    """Zip (DEFLATE) the engine output dir; returns the raw bytes.
-
-    Used when a caller requests ``archive_format="zip"``, which is what a
-    client emulating an upstream REST API needs when that API returns a `.zip`.
-
-    Carries exactly the members `_build_tarball_bytes` does — both take their
-    file list from `_archive_members`, so the two containers hold the same
-    files under the same names, and neither carries a link out of the output
-    directory.
-    """
-    report = _degraded.sink(report)
-    required_members = required_members or {}
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for child in _archive_members(output_dir, report, required_members):
-            arcname = child.relative_to(output_dir).as_posix()
-            required = required_members.get(child, ())
-
-            def describe(source: BinaryIO) -> zipfile.ZipInfo:
-                return _zip_info(source, arcname, child)
-
-            with _requirements.capture(child, required, report, describe) as snapshot:
-                if snapshot is None:
-                    continue
-                snapshot.metadata.file_size = snapshot.size
-                snapshot.metadata.compress_type = zf.compression
-                with zf.open(snapshot.metadata, mode="w") as destination:
-                    while chunk := snapshot.data.read(_requirements._COPY_CHUNK_BYTES):
-                        destination.write(chunk)
-    return buf.getvalue()
-
-
-def _build_archive_bytes(
-    output_dir: Path,
-    archive_format: str = "tar.gz",
-    report: _degraded.Report | None = None,
-    required_members: _requirements.RequiredMembers | None = None,
-) -> bytes:
-    """Build the output archive in the requested container ("tar.gz" or "zip")."""
-    if archive_format == "zip":
-        return _build_zip_bytes(output_dir, report, required_members)
-    return _build_tarball_bytes(output_dir, report, required_members)
+__all__ = [
+    "MIN_PRESIGN_TTL_SECONDS",
+    "RESERVED_ENTRY_KEYS",
+    "VALID_TRANSPORTS",
+    "_archive_members",
+    "_build_archive_bytes",
+    "_build_tarball_bytes",
+    "_build_zip_bytes",
+    "_safe_arcname",
+    "_zip_info",
+    "package_inline",
+    "package_results_entry",
+    "package_s3",
+    "package_tarball",
+    "presign_ttl_seconds",
+]
 
 
 def package_tarball(
@@ -396,6 +253,7 @@ def package_results_entry(
     archive_format: str = "tar.gz",
     metadata: dict[str, Any] | None = None,
     report: _degraded.Report | None = None,
+    budget: _response_size.ResponseBudget | None = None,
 ) -> dict[str, Any]:
     """Build one entry of the ``results: [...]`` response array.
 
@@ -421,6 +279,15 @@ def package_results_entry(
     still carries only the losses recorded while packaging that entry; the
     supplied report is what lets a worker count job-wide degradations without
     reading its responses back, or attach them to the span it already has open.
+
+    Raises ``response_size.ResponseTooLargeError`` when the packaged entry exceeds
+    what the gateway will deliver -- but only when ``ENFORCE_RESPONSE_CAP`` is on,
+    which it is not by default. A handler that converts exceptions then reports it
+    as ``ok=false`` instead of returning a response that is silently discarded.
+
+    Pass one ``budget`` across every entry of a single response so the total is
+    what is measured. Without it each entry is judged alone, and two that each fit
+    can still form a response that does not.
 
     ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
     unrecognised value raises: returning a successful entry carrying a
@@ -489,4 +356,9 @@ def package_results_entry(
     # complete when it is not.
     if (lost := report.entry()) is not None:
         entry[_degraded.ENTRY_KEY] = lost
+    # Last. An oversized entry is discarded by the gateway, which then reports the
+    # job COMPLETED with no output -- the caller pays for the parse to be told nothing.
+    _response_size.refuse_if_undeliverable(
+        entry, transport=transport, budget=budget
+    )
     return entry

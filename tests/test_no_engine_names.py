@@ -54,7 +54,14 @@ EXEMPT = (
 def _checked_files() -> list[Path]:
     """Package sources, tests, and the docs that ship with them."""
     found: list[Path] = []
-    for pattern in ("runpod_doc_worker/**/*.py", "tests/**/*.py", "*.md"):
+    for pattern in (
+        "runpod_doc_worker/**/*.py",
+        # The client half is engine-neutral for the same reason and was not
+        # scanned, so a module naming both engines passed this gate.
+        "client/**/*.py",
+        "tests/**/*.py",
+        "*.md",
+    ):
         found.extend(REPO_ROOT.glob(pattern))
     return sorted(
         p for p in found
