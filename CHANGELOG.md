@@ -1,3 +1,9 @@
+## [0.7.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.0...v0.7.1) (2026-08-27)
+
+### Bug Fixes
+
+* **release:** write the version into both distributions, not just the root ([50d5e31](https://github.com/sergeyshmakov/runpod-doc-worker/commit/50d5e316892da5517b39828e03fedb977d3e0001))
+
 ## [0.7.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.6.0...v0.7.0) (2026-08-27)
 
 ### Features
