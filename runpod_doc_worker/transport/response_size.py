@@ -27,12 +27,12 @@ MAX_RESPONSE_MB = 20
 
 # How much of the cap a measured response is allowed to claim, per transport.
 #
-# Not one number, because the measurements differ in kind. A base64 tarball is
-# measured exactly -- the string *is* the payload -- so only the surrounding JSON
-# (the debug block, per-file metadata) is unaccounted for, and 3% covers it. An
-# inline response is estimated by summing markdown text and image bytes, which
-# ignores JSON encoding overhead and runs low by around a tenth on real documents;
-# refusing at 90% keeps an under-estimate from sailing past the real ceiling.
+# Not one number, because what is unaccounted for differs. For a base64 tarball
+# the string *is* the payload, so only the envelope around it -- the debug block, a
+# second entry, the results wrapper -- is missing, and 3% covers it. An inline
+# response is many text and base64 fields whose JSON escaping `measure_entry_bytes`
+# does not model, and one entry is more often joined by others, so 90% leaves room
+# for both.
 #
 # Being wrong in this direction costs a caller a response that would have fitted.
 # Being wrong in the other costs them the whole job with no explanation, which is
@@ -47,6 +47,51 @@ _HEADROOM = {
 # gap in a lookup table.
 _EXEMPT = frozenset({"s3"})
 
+# The heaviest optional output this worker produces, named in the refusal so it can
+# suggest the smallest `formats` change that would fit. Set once by the consumer --
+# it is a property of the engine, not of any one job, and threading it through the
+# packaging call would put an engine detail in a signature that has none.
+BULKY_ARTIFACT: str | None = None
+
+
+class ResponseTooLargeError(RuntimeError):
+    """A packaged response would be discarded by the gateway rather than sent.
+
+    Raised from :func:`runpod_doc_worker.transport.package.package_results_entry`,
+    so a handler that already turns an exception into ``ok=false`` reports it to
+    the caller with no extra wiring. That is the whole point: the alternative is
+    a job the caller sees as ``COMPLETED`` and empty.
+
+    A deployment that genuinely is not behind the cap -- a proxy in front of the
+    worker, a caller reading results some other way -- raises
+    ``response_size.MAX_RESPONSE_MB`` to disable the refusal.
+    """
+
+
+def measure_entry_bytes(entry: object) -> int:
+    """Roughly the bytes an entry will occupy in the response JSON.
+
+    Walks the structure and sums the payload lengths rather than serialising it.
+    ``json.dumps`` on a 20 MB base64 string allocates a second 20 MB string, and
+    doing that to *decide whether the response is too big* is the wrong trade in a
+    container that has just finished a GPU parse.
+
+    The sum ignores JSON escaping, which inflates text by a few percent, and the
+    per-transport headroom below is what absorbs that.
+    """
+    if isinstance(entry, str):
+        return len(entry.encode("utf-8", "replace"))
+    if isinstance(entry, dict):
+        return sum(
+            len(str(key)) + 4 + measure_entry_bytes(value)
+            for key, value in entry.items()
+        )
+    if isinstance(entry, (list, tuple)):
+        return sum(measure_entry_bytes(item) + 1 for item in entry)
+    # Numbers, booleans, None: a handful of characters each, and never the reason
+    # a response is too large.
+    return 8
+
 
 def budget_bytes(transport: str) -> int:
     """The size at which a response of this transport is refused."""
@@ -59,6 +104,21 @@ def exceeds_gateway_cap(size_bytes: int, *, transport: str) -> bool:
     if transport in _EXEMPT:
         return False
     return size_bytes > budget_bytes(transport)
+
+
+def refuse_if_undeliverable(entry: dict, *, transport: str) -> None:
+    """Raise :class:`ResponseTooLargeError` if this entry would not be delivered.
+
+    Measurement, policy and message in one call, so the packaging path is a single
+    line and this module stays the only place that knows the cap.
+    """
+    measured = measure_entry_bytes(entry)
+    if exceeds_gateway_cap(measured, transport=transport):
+        raise ResponseTooLargeError(
+            oversized_response_error(
+                measured, transport=transport, bulky_artifact=BULKY_ARTIFACT
+            )
+        )
 
 
 def oversized_response_error(
@@ -98,7 +158,8 @@ def oversized_response_error(
         f"Any of these returns the output:\n"
         f"{drop}"
         f' * transport="s3", which returns a presigned URL instead of the bytes '
-        f"(needs the BUCKET_* env vars on this endpoint);\n"
+        f"(needs the BUCKET_* env vars on this endpoint, and the worker installed "
+        f"with the s3 extra -- the upload imports boto3);\n"
         f" * a bounded start_page / end_page range, the only option that keeps "
         f"every format."
     )

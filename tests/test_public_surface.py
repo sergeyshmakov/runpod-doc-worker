@@ -44,6 +44,15 @@ PUBLIC = {
         "resolve",
         "validate",
     ),
+    "runpod_doc_worker.transport.response_size": (
+        "BULKY_ARTIFACT",
+        "MAX_RESPONSE_MB",
+        "ResponseTooLargeError",
+        "exceeds_gateway_cap",
+        "measure_entry_bytes",
+        "oversized_response_error",
+        "refuse_if_undeliverable",
+    ),
     "runpod_doc_client": (
         "GATEWAY_RESPONSE_CAP_MB",
         "ResponseError",

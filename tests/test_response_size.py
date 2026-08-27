@@ -36,9 +36,10 @@ def test_a_response_past_the_cap_is_refused() -> None:
 
 
 def test_inline_keeps_more_headroom_than_a_tarball() -> None:
-    """The measurements differ in kind, so one margin would be wrong for one of
-    them: a base64 string is the payload exactly, while an inline size is a sum of
-    markdown and image bytes that ignores JSON overhead and runs low."""
+    """What is unaccounted for differs, so one margin would be wrong for one of
+    them: for a tarball the base64 string is the payload and only the envelope is
+    missing, while an inline entry is many fields whose JSON escaping the
+    measurement does not model."""
     assert response_size.budget_bytes("inline") < response_size.budget_bytes(
         "tarball_b64"
     )
@@ -86,6 +87,27 @@ def test_the_refusal_works_without_a_named_artifact() -> None:
 # -----------------------------------------------------------------------------
 # The client half: why did a COMPLETED job carry nothing?
 # -----------------------------------------------------------------------------
+
+
+def test_an_s3_job_with_no_output_is_not_blamed_on_size() -> None:
+    """An s3 response is a presigned URL a few hundred bytes long, so the cap
+    cannot be what dropped it -- and the generic remedies would be telling the
+    caller to switch to the transport they are already using."""
+    message = client_responses.describe_dropped_response("s3")
+    assert "response-size cap is not what happened" in message
+    assert "BUCKET_" in message, "point at the thing that actually fails"
+    assert "s3 extra" in message, "boto3 comes from the extra, not from BUCKET_*"
+    body = message.split("What to check instead")[1]
+    assert 'transport="s3"' not in body
+
+
+def test_both_messages_name_the_s3_extra() -> None:
+    """Setting BUCKET_* is not enough on a worker installed without the extra:
+    package_s3 imports boto3 lazily and fails with ModuleNotFoundError."""
+    refusal = response_size.oversized_response_error(30 * MB, transport="inline")
+    explanation = client_responses.describe_dropped_response("tarball_b64")
+    assert "s3 extra" in refusal
+    assert "s3 extra" in explanation
 
 
 @pytest.mark.parametrize("transport", ["tarball_b64", "inline", "something-new"])

@@ -51,6 +51,27 @@ def describe_dropped_response(
             'transport="inline" returns the artifacts as JSON, and '
             f"{detail} is usually the bulk of it."
         )
+    elif transport == "s3":
+        # Not a size problem, and saying so matters: an s3 response is a presigned
+        # URL a few hundred bytes long, so the cap cannot be what dropped it, and
+        # the remedies below would be telling the caller to switch to the transport
+        # they are already on.
+        return (
+            "the job reported COMPLETED but carried no output.\n"
+            "\n"
+            "This was a transport=\"s3\" job, whose response is a "
+            "presigned URL rather than the output itself -- so the "
+            "response-size cap is not what happened here, whatever the "
+            "document weighed.\n"
+            "\n"
+            "What to check instead:\n"
+            "  * the endpoint has the BUCKET_* env vars set, and the worker "
+            "was installed with the s3 extra -- the upload imports boto3;\n"
+            "  * the worker log for an upload failure, which is where a "
+            "bucket rejection or a credentials problem is reported;\n"
+            "  * that the job reached a worker at all, rather than being "
+            "dropped before one picked it up."
+        )
     else:
         cause = f"transport={transport!r} returned no output."
 
@@ -77,7 +98,8 @@ def describe_dropped_response(
         "Any of these returns the output:\n"
         f"{drop}"
         '  * transport="s3", which returns a presigned URL instead of the bytes '
-        "-- needs the BUCKET_* env vars set on the endpoint;\n"
+        "-- needs the BUCKET_* env vars on the endpoint, and the worker "
+        "installed with the s3 extra, since the upload imports boto3;\n"
         "  * a bounded start_page / end_page range, the only option that keeps "
         "every format."
     )

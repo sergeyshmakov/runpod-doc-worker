@@ -37,6 +37,7 @@ from runpod_doc_worker import paths as _paths
 from runpod_doc_worker.contract import artifacts as _artifacts
 from runpod_doc_worker.contract import degraded as _degraded
 from runpod_doc_worker.transport import archive_requirements as _requirements
+from runpod_doc_worker.transport import response_size as _response_size
 
 
 # The ways output can be returned. A worker's own schema is what rejects a bad
@@ -422,6 +423,10 @@ def package_results_entry(
     supplied report is what lets a worker count job-wide degradations without
     reading its responses back, or attach them to the span it already has open.
 
+    Raises ``response_size.ResponseTooLargeError`` when the packaged entry exceeds
+    what the gateway will deliver, so a handler that converts exceptions reports it
+    as ``ok=false`` instead of returning a response that is silently discarded.
+
     ``transport`` must be one of ``{"tarball_b64", "inline", "s3"}``. An
     unrecognised value raises: returning a successful entry carrying a
     different payload than the caller asked for is the kind of wrong that
@@ -489,4 +494,7 @@ def package_results_entry(
     # complete when it is not.
     if (lost := report.entry()) is not None:
         entry[_degraded.ENTRY_KEY] = lost
+    # Last. An oversized entry is discarded by the gateway, which then reports the
+    # job COMPLETED with no output -- the caller pays for the parse to be told nothing.
+    _response_size.refuse_if_undeliverable(entry, transport=transport)
     return entry
