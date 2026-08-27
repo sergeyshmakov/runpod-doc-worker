@@ -86,23 +86,31 @@ Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive
 
 ### Scoping the local-fetch bypass
 
-`<PREFIX>_ALLOW_LOCAL_FETCH` is an **operator's** exemption: it lets the worker
-fetch documents from a private mirror. It is scoped to the whole worker, so without
-care it also exempts every URL a *caller* supplies in a job payload — and a caller
-naming `169.254.169.254` for a model-server field would then reach cloud metadata
-from inside the worker's network.
+`<PREFIX>_ALLOW_LOCAL_FETCH` is set by an **operator**, but what it exempts is
+every URL the worker fetches — and those URLs still come from callers. Turning it on
+to reach a private document mirror therefore also lets a caller name
+`169.254.169.254` and be fetched. That is the deliberate trade of the variable, and
+it is why the exemption should reach as few fields as possible.
 
 Pass `allow_local=False` to `check_target`, `resolve_checked` or
-`resolve_checked_host` for any URL that came from a job payload. `None`, the
-default, consults the operator's setting as before.
+`resolve_checked_host` for any URL you are not prepared to have the bypass cover.
+`None`, the default, consults the operator's setting as before.
 
 ```python
-# an operator's document mirror keeps its exemption
+# `file_url` is caller-supplied too. Omitting the override means the operator's
+# bypass, if set, covers it — which is what an endpoint serving its own private
+# mirror wants, and an SSRF hole on an endpoint open to untrusted callers.
 net.check_target(file_url, field="file_url")
 
-# a caller-supplied target does not get it
+# `server_url` names a service rather than a document, so nothing an operator
+# switches on for their mirror should reach it.
 net.check_target(server_url, field="server_url", allow_local=False)
 ```
+
+The distinction is not operator-owned versus caller-owned — every job field is
+caller-supplied. It is how much the operator meant to permit when they set the
+variable: fetching documents from their own network, not letting callers choose
+arbitrary internal services.
 
 ## Response size
 

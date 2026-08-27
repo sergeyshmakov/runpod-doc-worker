@@ -98,15 +98,32 @@ def test_the_default_still_consults_the_environment(bypass_on) -> None:
     net.check_target("http://rfc1918.internal/report.pdf", field="file_url")
 
 
-def test_the_message_still_names_the_escape_hatch() -> None:
-    """A refusal that does not say what to set leaves an operator guessing -- and
-    for `allow_local=False` the hint is still worth printing, since the operator
-    reading it may be the one who set the variable and expected it to apply."""
-    with pytest.raises(ValueError) as caught:
+def test_the_refusal_offers_the_env_var_only_when_it_would_work() -> None:
+    """An earlier version of this test asserted the opposite, and was wrong.
+
+    It required the `ALLOW_LOCAL_FETCH` hint even for `allow_local=False`, on the
+    reasoning that the operator reading it may have set the variable and expected
+    it to apply. But that branch deliberately ignores the variable, so the message
+    was telling them to set something that cannot help -- they would set it,
+    redeploy, and get the identical error. A hint that cannot be followed is worse
+    than none, because it costs a cycle to disprove.
+    """
+    with pytest.raises(ValueError) as unset:
+        net.check_target("http://rfc1918.internal/report.pdf", field="file_url")
+    assert "ALLOW_LOCAL_FETCH=1 to allow this" in str(unset.value), (
+        "with the bypass merely unset, turning it on is the fix"
+    )
+
+    with pytest.raises(ValueError) as refused:
         net.check_target(
             "http://rfc1918.internal/v1", field="server_url", allow_local=False
         )
-    assert "ALLOW_LOCAL_FETCH" in str(caught.value)
+    message = str(refused.value)
+    assert "does not honour" in message
+    assert "ALLOW_LOCAL_FETCH=1 to allow this" not in message, (
+        "this field ignores the variable; offering it sends the reader nowhere"
+    )
+    assert "server_url" in message, "name the field, which is the actionable part"
 
 
 def test_resolve_checked_returns_the_addresses_it_validated() -> None:

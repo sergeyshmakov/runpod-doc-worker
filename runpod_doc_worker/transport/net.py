@@ -54,6 +54,23 @@ def _allow_local_hint() -> str:
     return f"set {_config.active().env_name(ALLOW_LOCAL_FETCH)}=1 to allow this"
 
 
+def _policy_hint(field: str) -> str:
+    """Why setting the env var will not help for this field.
+
+    When a caller passes ``allow_local=False`` the environment is deliberately
+    ignored, so printing "set <PREFIX>_ALLOW_LOCAL_FETCH=1" sends the reader to a
+    switch that cannot work -- they would set it, redeploy, and get the identical
+    error. Naming the field is the actionable part: the fix is to stop sending a
+    private address in it, or to put the host on this worker's allow-list if it
+    has one.
+    """
+    return (
+        f"{field} does not honour "
+        f"{_config.active().env_name(ALLOW_LOCAL_FETCH)}, because its value comes "
+        f"from the caller rather than from this endpoint's configuration"
+    )
+
+
 def require_http_url(url: str, *, field: str) -> str:
     """Return the **host** of ``url``, or raise if it isn't a usable HTTP target.
 
@@ -184,12 +201,15 @@ def resolve_checked_host(
         raise ValueError(f"host {host!r} could not be resolved: no addresses returned")
     permitted = allow_local_targets() if allow_local is None else allow_local
     if not permitted:
+        # Which hint depends on *why* the target was refused. With the bypass
+        # merely unset an operator can turn it on; with it refused for this field
+        # they cannot, and saying otherwise costs them a deploy cycle to discover.
+        hint = _allow_local_hint() if allow_local is None else _policy_hint(field)
         for addr in addresses:
             if not _is_routable(addr):
                 raise ValueError(
                     f"{field} must point at a publicly routable host; "
-                    f"{host!r} resolves to {addr} "
-                    f"({_allow_local_hint()})"
+                    f"{host!r} resolves to {addr} ({hint})"
                 )
     return addresses
 
