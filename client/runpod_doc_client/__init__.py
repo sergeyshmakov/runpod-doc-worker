@@ -24,10 +24,16 @@ from runpod_doc_client.fetch import download, require_fetchable_url
 from runpod_doc_client import limits
 from runpod_doc_client.names import safe_output_name, within
 from runpod_doc_client.payloads import decode_b64
+from runpod_doc_client.responses import (
+    GATEWAY_RESPONSE_CAP_MB,
+    describe_dropped_response,
+)
 
 __all__ = [
+    "GATEWAY_RESPONSE_CAP_MB",
     "ResponseError",
     "decode_b64",
+    "describe_dropped_response",
     "download",
     "extract",
     "require_fetchable_url",

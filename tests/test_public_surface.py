@@ -45,8 +45,10 @@ PUBLIC = {
         "validate",
     ),
     "runpod_doc_client": (
+        "GATEWAY_RESPONSE_CAP_MB",
         "ResponseError",
         "decode_b64",
+        "describe_dropped_response",
         "download",
         "extract",
         "require_fetchable_url",
