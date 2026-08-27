@@ -1,3 +1,14 @@
+## [0.7.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.6.0...v0.7.0) (2026-08-27)
+
+### Features
+
+* **transport:** make the cap refusal opt-in, and measure a whole response ([c6c485c](https://github.com/sergeyshmakov/runpod-doc-worker/commit/c6c485c36b8ba739e4591db5c784d11a95b763bc))
+* **transport:** refuse a response the gateway would silently discard ([152cc00](https://github.com/sergeyshmakov/runpod-doc-worker/commit/152cc00485b5c918f14aa1879dd1974f81f0c5d0))
+
+### Bug Fixes
+
+* **transport:** actually call the cap check, and fix two gaps in its messages ([aa770c5](https://github.com/sergeyshmakov/runpod-doc-worker/commit/aa770c5e263e94b01b275f7dc4ff2bde168fe044))
+
 ## [0.6.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.5.0...v0.6.0) (2026-08-26)
 
 ### Features
