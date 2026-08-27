@@ -156,7 +156,7 @@ def test_a_zip_reports_the_same_omissions_as_a_tarball(output_dir, monkeypatch, 
     """Both containers take their members from the same list, so both have to
     report the same losses — otherwise the answer depends on the container."""
     monkeypatch.setattr(
-        "runpod_doc_worker.transport.package._safe_arcname", lambda name: False
+        "runpod_doc_worker.transport.archive_build._safe_arcname", lambda name: False
     )
     tar_entry = _entry(output_dir, transport="tarball_b64")
     zip_entry = _entry(output_dir, transport="tarball_b64", archive_format="zip")
@@ -193,7 +193,7 @@ def test_a_real_symlink_loop_is_reported_by_the_archive(output_dir, capsys):
 
 def test_a_supplied_report_sees_archive_losses_too(output_dir, monkeypatch, capsys):
     monkeypatch.setattr(
-        "runpod_doc_worker.transport.package._safe_arcname", lambda name: False
+        "runpod_doc_worker.transport.archive_build._safe_arcname", lambda name: False
     )
     report = degraded.Report()
     _entry(output_dir, transport="tarball_b64", report=report)

@@ -84,6 +84,28 @@ From `runpod_doc_worker.transport.package`:
 
 Valid transports are `inline`, `tarball_b64`, and `s3`. Valid documented archive formats are `tar.gz` and `zip`.
 
+## Response size
+
+`runpod_doc_worker.transport.response_size` — refusing a response the gateway would
+discard rather than have it dropped silently. Off unless a worker opts in; see
+[Packaging → the response-size cap](/docs/guides/packaging/#the-response-size-cap).
+
+| Name | Kind | Notes |
+|---|---|---|
+| `ENFORCE_RESPONSE_CAP` | `bool` | `False` by default. Set `True` to refuse an undeliverable response |
+| `MAX_RESPONSE_MB` | `int` | `20`, the `/runsync` ceiling. Raise to disable the refusal |
+| `BULKY_ARTIFACT` | `str \| None` | The heaviest optional output, named in the refusal |
+| `ResponseTooLargeError` | exception | Raised by `package_results_entry` when enforcement is on |
+| `ResponseBudget` | class | One per response, so several entries are measured together |
+| `exceeds_gateway_cap` | function | The predicate, for a worker deciding before it packages |
+| `measure_entry_bytes` | function | Serialised size of an entry, escaping included |
+| `oversized_response_error` | function | The message, if a worker wants to report it itself |
+| `refuse_if_undeliverable` | function | Measure, check and raise in one call |
+
+The client half has its counterpart, `runpod_doc_client.describe_dropped_response`,
+for explaining a response that *was* dropped — against a worker without the guard,
+or on `/run` where the cap is half as high.
+
 ## Logging and redaction
 
 From `runpod_doc_worker.obs.logging`:

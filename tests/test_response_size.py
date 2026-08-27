@@ -84,6 +84,45 @@ def test_the_refusal_works_without_a_named_artifact() -> None:
     assert "formats list" in message
 
 
+def test_the_measurement_matches_real_json_serialisation() -> None:
+    """Counted rather than absorbed by the margin.
+
+    An earlier version assumed escaping was "a few percent", which is true of prose
+    and false of what this measures: extracted text full of quotes, or a JSON
+    artifact embedded as a string, doubles. A payload measured just under the inline
+    budget would then serialise past the real ceiling and be dropped -- the failure
+    this module exists to prevent, reintroduced by the measurement meant to prevent
+    it.
+    """
+    import json
+
+    for text in (
+        "x" * 1000,
+        chr(34) * 1000,
+        chr(92) * 1000,
+        chr(1) * 1000,
+        ("a" + chr(34)) * 500,
+        "café " * 200,
+        chr(1055) * 200,   # Cyrillic: two UTF-8 bytes, six serialised
+        chr(20320) * 200,  # CJK: three UTF-8 bytes, six serialised
+        chr(128512) * 50,  # astral: a surrogate pair, twelve serialised
+
+    ):
+        measured = response_size.measure_entry_bytes(text)
+        serialised = len(json.dumps(text).encode("utf-8")) - 2  # minus the quotes
+        assert measured == serialised, (
+            f"mis-measured {text[:12]!r}...: {measured} != {serialised}"
+        )
+
+
+def test_escaping_is_not_written_off_as_a_small_margin() -> None:
+    """The specific regression: a string of quotes costs twice its own bytes, which
+    no per-transport headroom of 10% can absorb."""
+    plain = response_size.measure_entry_bytes("a" * 1000)
+    quoted = response_size.measure_entry_bytes(chr(34) * 1000)
+    assert quoted == 2 * plain
+
+
 # -----------------------------------------------------------------------------
 # The client half: why did a COMPLETED job carry nothing?
 # -----------------------------------------------------------------------------

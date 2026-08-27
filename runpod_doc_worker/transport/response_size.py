@@ -53,6 +53,16 @@ _EXEMPT = frozenset({"s3"})
 # packaging call would put an engine detail in a signature that has none.
 BULKY_ARTIFACT: str | None = None
 
+# Whether an undeliverable response is refused. Off by default, so adopting a
+# release that contains this does not change what any existing worker returns --
+# `package_results_entry` went on returning oversized entries before this existed,
+# and a library should not start raising from a version bump.
+#
+# A consumer turns it on where it configures the rest of its harness settings, and
+# should: the alternative is a job the caller sees as COMPLETED and empty. Off, the
+# refusal is inert and only the client-side explanation applies.
+ENFORCE_RESPONSE_CAP = False
+
 
 class ResponseTooLargeError(RuntimeError):
     """A packaged response would be discarded by the gateway rather than sent.
@@ -68,6 +78,49 @@ class ResponseTooLargeError(RuntimeError):
     """
 
 
+# What one character costs once serialised. `json.dumps` defaults to
+# `ensure_ascii=True`, which is what the SDK returning a job result uses, so the
+# body the gateway measures is pure ASCII: every non-ASCII character is written as
+# a six-byte `\uXXXX` escape, and one outside the BMP as a twelve-byte surrogate
+# pair.
+#
+# That is the difference between a rounding error and a factor of two on the
+# documents this worker exists for. A CJK character is three UTF-8 bytes and six
+# serialised; Cyrillic and accented Latin are two and six. Counting UTF-8 bytes
+# under-measured a Chinese or Russian parse by more than half, and under-measuring
+# is the failure this module exists to prevent -- the response sails past the real
+# ceiling and is dropped with no explanation.
+#
+# Over-measuring costs a caller a response that would have fitted, which arrives as
+# a loud error naming the escape hatch. The asymmetry is why this counts the worst
+# case rather than the average one.
+_SHORT_ESCAPES = frozenset('"' + chr(92) + chr(8) + chr(12) + chr(10) + chr(13) + chr(9))
+
+
+def _encoded_length(text: str) -> int:
+    """The bytes ``text`` occupies inside a JSON string, escaping included.
+
+    Counted in one pass rather than by serialising: `json.dumps` on a 20 MB payload
+    allocates a second copy of it, and doing that in order to decide whether the
+    response is too large is the wrong trade in a container that has just finished
+    a GPU parse.
+    """
+    total = 0
+    for char in text:
+        code = ord(char)
+        if char in _SHORT_ESCAPES:
+            total += 2
+        elif code < 0x20:
+            total += 6  # \u001f
+        elif code < 0x80:
+            total += 1
+        elif code < 0x10000:
+            total += 6  # \uXXXX
+        else:
+            total += 12  # a surrogate pair, \uXXXX\uXXXX
+    return total
+
+
 def measure_entry_bytes(entry: object) -> int:
     """Roughly the bytes an entry will occupy in the response JSON.
 
@@ -76,11 +129,17 @@ def measure_entry_bytes(entry: object) -> int:
     doing that to *decide whether the response is too big* is the wrong trade in a
     container that has just finished a GPU parse.
 
-    The sum ignores JSON escaping, which inflates text by a few percent, and the
-    per-transport headroom below is what absorbs that.
+    Strings are counted at their *serialised* length, which on the content this
+    measures is not close to their byte length: the SDK serialises with
+    ``ensure_ascii=True``, so every non-ASCII character becomes a six-byte escape.
+    A Chinese or Russian parse is more than twice its UTF-8 size once encoded, and
+    counting bytes under-measured exactly the documents this worker is for.
+
+    The per-transport headroom below covers the envelope around the entry, not
+    this -- no margin absorbs a factor of two.
     """
     if isinstance(entry, str):
-        return len(entry.encode("utf-8", "replace"))
+        return _encoded_length(entry)
     if isinstance(entry, dict):
         return sum(
             len(str(key)) + 4 + measure_entry_bytes(value)
@@ -106,14 +165,58 @@ def exceeds_gateway_cap(size_bytes: int, *, transport: str) -> bool:
     return size_bytes > budget_bytes(transport)
 
 
-def refuse_if_undeliverable(entry: dict, *, transport: str) -> None:
+class ResponseBudget:
+    """The running size of one response, across every entry it will carry.
+
+    A per-entry check misses the case it was written for: two entries of 11 MB
+    each pass individually and the 22 MB response they form is still discarded.
+    The gateway measures the whole body, so a budget has to as well.
+
+    One per job, never module-level: a worker with a concurrency modifier runs
+    several jobs in one process, and a shared counter would refuse whichever
+    unlucky job happened to arrive after the others.
+
+    ``envelope`` is what the handler adds around the entries -- the debug block,
+    timings, the results wrapper itself. It has a default because most of it is
+    small and a caller who has not measured theirs should still get a budget that
+    errs toward refusing.
+    """
+
+    __slots__ = ("_transport", "used")
+
+    def __init__(self, *, transport: str, envelope: int = 8 * 1024) -> None:
+        self._transport = transport
+        self.used = envelope
+
+    def add(self, entry: dict) -> int:
+        """Charge ``entry`` to the budget and return the new total."""
+        self.used += measure_entry_bytes(entry)
+        return self.used
+
+    def exceeded(self) -> bool:
+        return exceeds_gateway_cap(self.used, transport=self._transport)
+
+
+def refuse_if_undeliverable(
+    entry: dict,
+    *,
+    transport: str,
+    budget: ResponseBudget | None = None,
+) -> None:
     """Raise :class:`ResponseTooLargeError` if this entry would not be delivered.
 
     Measurement, policy and message in one call, so the packaging path is a single
     line and this module stays the only place that knows the cap.
     """
-    measured = measure_entry_bytes(entry)
-    if exceeds_gateway_cap(measured, transport=transport):
+    if not ENFORCE_RESPONSE_CAP:
+        return
+    if budget is not None:
+        measured = budget.add(entry)
+        over = budget.exceeded()
+    else:
+        measured = measure_entry_bytes(entry)
+        over = exceeds_gateway_cap(measured, transport=transport)
+    if over:
         raise ResponseTooLargeError(
             oversized_response_error(
                 measured, transport=transport, bulky_artifact=BULKY_ARTIFACT

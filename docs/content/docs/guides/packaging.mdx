@@ -99,6 +99,78 @@ Every item is also written to stdout as a `response degraded` warning carrying t
 
 To decide the outcome yourself rather than shipping a hole, mark the artifact [`required`](/docs/guides/artifacts/#require-the-artifact-the-response-exists-for).
 
+## The response-size cap
+
+RunPod's gateway caps a response at 20 MB on `/runsync` and 10 MB on `/run`. Over
+that it does not report an error: the job comes back `COMPLETED` with a normal
+`executionTime` and **no `output` key at all**, so the caller receives `None` and
+nothing in the reply names size as the cause.
+
+`runpod_doc_worker.transport.response_size` can refuse such a response instead, so
+the caller gets an explanation rather than silence. It is **off by default**:
+adopting a release that contains it does not change what an existing worker
+returns.
+
+```python
+from runpod_doc_worker.transport import response_size
+
+response_size.ENFORCE_RESPONSE_CAP = True      # opt in
+response_size.BULKY_ARTIFACT = "middle.json"   # your heaviest optional output
+```
+
+| Name | Default | What it does |
+|---|---|---|
+| `ENFORCE_RESPONSE_CAP` | `False` | Whether an undeliverable response is refused at all |
+| `BULKY_ARTIFACT` | `None` | Named in the refusal, so it can suggest the smallest `formats` change that would fit |
+| `MAX_RESPONSE_MB` | `20` | The ceiling. Raise it to disable the refusal on a deployment that is not behind the gateway |
+
+With it on, `package_results_entry` raises
+`response_size.ResponseTooLargeError`. A handler that already turns an exception
+into `ok=false` therefore reports the size and the way out with no further wiring:
+
+```
+the output is 24.3 MB, past the 18.0 MB this transport can return (RunPod caps a
+response at 20 MB on /runsync and half that on /run).
+...
+Any of these returns the output:
+ * transport="inline" with a formats list that leaves out middle.json;
+ * transport="s3", which returns a presigned URL instead of the bytes (needs the
+   BUCKET_* env vars on this endpoint, and the worker installed with the s3
+   extra -- the upload imports boto3);
+ * a bounded start_page / end_page range, the only option that keeps every format.
+```
+
+### Multi-file jobs
+
+The gateway measures the whole body, so a job returning several entries has to
+measure the whole body too — two entries of 11 MB each pass individually and the
+22 MB response they form is still discarded. Pass one budget across them:
+
+```python
+budget = response_size.ResponseBudget(transport=transport)
+for source in sources:
+    entries.append(package.package_results_entry(..., budget=budget))
+```
+
+One budget per response, never a module-level one: a worker with a concurrency
+modifier runs several jobs in one process, and a shared counter would refuse
+whichever job happened to arrive last. `ResponseBudget` also starts partly spent,
+for the envelope the handler adds around the entries; pass `envelope=` if you have
+measured yours.
+
+### How the size is measured
+
+Not by serialising the entry — `json.dumps` on a 20 MB payload allocates a second
+copy of it. The entry is walked and its strings counted at their *serialised*
+length, which matters more than it sounds: the SDK serialises with
+`ensure_ascii=True`, so every non-ASCII character becomes a six-byte `\uXXXX`
+escape. A Chinese or Russian parse is more than twice its UTF-8 size once encoded.
+
+The remaining unknown is the envelope, absorbed by a per-transport margin: 97% of
+the cap for `tarball_b64`, where the base64 string *is* the payload, and 90% for
+`inline`. `s3` is exempt, since its response is a presigned URL whatever the output
+weighed.
+
 ## S3 configuration
 
 Install the `s3` extra and set these variables on the endpoint:
