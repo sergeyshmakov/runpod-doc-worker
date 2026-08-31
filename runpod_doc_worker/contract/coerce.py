@@ -5,6 +5,20 @@ with a message naming the field. They are about one value at a time, which is
 what separates them from a worker's cross-field schema rules — and what makes
 them worth testing exhaustively and shareable at all.
 
+Two exceptions to that contract, both in :func:`one_of`, both deliberate:
+
+* A **callable** ``default`` that raises propagates its own exception unchanged.
+  When the value is absent, the default's failure *is* the failure, and it names
+  the operator's misconfigured variable. Flattening it into a "not one of" message
+  would hide which variable was malformed — the bug the callable form exists to
+  fix. A consumer wrapping these functions and catching only ``ValueError`` will
+  not catch it.
+* A **falsey** value is treated as absent and replaced by the default, so ``False``,
+  ``0``, ``""`` and ``[]`` select the default rather than being rejected. Note the
+  asymmetry this produces: ``True`` is truthy, so it reaches the membership check
+  and is refused, while ``False`` is not. Unlike the numeric validators, ``one_of``
+  does **not** refuse booleans.
+
 ``fail`` is the reason this module is in ``contract``. The prefix is part of the
 job contract every adopting worker presents: each rejection a caller sees starts
 with the same words, so a client can branch on "my request was bad" without
@@ -63,11 +77,20 @@ def _as_float(name: str, value: Any) -> float:
 
     ``math.isfinite`` cannot catch this: the conversion raises before there is a
     float to test.
+
+    The digit count is derived from ``bit_length`` rather than ``len(str(value))``.
+    Python caps integer-to-string conversion at 4300 digits by default (CVE-2020-10735),
+    so ``str()`` on a large enough integer raises a ``ValueError`` of its own -- one
+    without this module's prefix, which put the caller right back outside the
+    contract this function exists to keep them inside. ``bit_length`` is exact,
+    cheap, and has no such limit; ``643 / 2136`` is log10(2) to seven places, in
+    integer arithmetic so nothing converts to a float on the way.
     """
     try:
         return float(value)
     except OverflowError:
-        fail(f"{name} must be within the range of a float; got a {len(str(value))}-digit integer")
+        digits = value.bit_length() * 643 // 2136 + 1
+        fail(f"{name} must be within the range of a float; got a {digits}-digit integer")
         raise  # unreachable; `fail` always raises. Present for the type checker.
 
 
@@ -123,6 +146,16 @@ def one_of(
     default: Union[str, Callable[[], str]],
 ) -> str:
     """A value from a closed set, with the empty case falling back.
+
+    **Absent means falsey**, not just ``None``: ``False``, ``0``, ``""`` and ``[]``
+    all select the default instead of being rejected. So unlike the numeric
+    validators in this module, this one does not refuse booleans — and it is
+    asymmetric about them, since ``True`` reaches the membership check and is
+    refused while ``False`` never gets there. A worker that must reject a boolean
+    for an enum-shaped field checks the type before calling this.
+
+    **A callable ``default`` that raises propagates**, rather than being turned into
+    a ``ValueError`` from this module. See the module docstring.
 
     ``default`` may be a callable, resolved only when ``value`` is absent. That
     matters wherever resolving the default can itself fail: Python evaluates

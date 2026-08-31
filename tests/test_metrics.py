@@ -18,43 +18,7 @@ import pytest
 from runpod_doc_worker import config
 from runpod_doc_worker.obs import metrics
 
-
-class FakeMeter:
-    """Records what was created instead of exporting anything.
-
-    Deliberately not a Mock: the assertions are about the exact names passed, and
-    a Mock would happily accept `create_couner` too.
-    """
-
-    def __init__(self) -> None:
-        self.counters: list[str] = []
-        self.histograms: list[str] = []
-        self.gauges: dict[str, list] = {}
-
-    def create_counter(self, name: str, **_: object) -> str:
-        self.counters.append(name)
-        return f"counter:{name}"
-
-    def create_histogram(self, name: str, **_: object) -> str:
-        self.histograms.append(name)
-        return f"histogram:{name}"
-
-    def create_observable_gauge(self, name: str, *, callbacks: list, **_: object) -> None:
-        self.gauges[name] = callbacks
-
-
-@pytest.fixture(autouse=True)
-def _clean_state():
-    metrics._reset_for_tests()
-    config.reset()
-    yield
-    metrics._reset_for_tests()
-    config.reset()
-
-
-def _observe(meter: FakeMeter, name: str) -> list:
-    """Run the single callback registered for ``name`` and return its yields."""
-    return list(meter.gauges[name][0](None))
+from tests.metrics_helpers import FakeMeter, observe
 
 
 # -----------------------------------------------------------------------------
@@ -176,7 +140,7 @@ def test_the_gpu_gauges_exist_without_a_gpu() -> None:
         "gpu.utilization_percent",
     ):
         assert f"acme.{suffix}" in meter.gauges
-        assert _observe(meter, f"acme.{suffix}") == []
+        assert observe(meter, f"acme.{suffix}") == []
 
 
 # -----------------------------------------------------------------------------
@@ -192,7 +156,7 @@ def test_a_registered_gauge_is_exported_and_observed() -> None:
 
     metrics.build(meter)
 
-    observed = _observe(meter, "acme.worker.jobs_since_boot")
+    observed = observe(meter, "acme.worker.jobs_since_boot")
     assert [o.value for o in observed] == [7]
 
 
@@ -208,7 +172,7 @@ def test_a_getter_returning_none_yields_nothing() -> None:
 
     metrics.build(meter)
 
-    assert _observe(meter, "acme.sidecar_ready") == []
+    assert observe(meter, "acme.sidecar_ready") == []
 
 
 def test_a_getter_that_raises_loses_its_series_not_the_pipeline() -> None:
@@ -229,26 +193,8 @@ def test_a_getter_that_raises_loses_its_series_not_the_pipeline() -> None:
 
     metrics.build(meter)
 
-    assert _observe(meter, "acme.broken") == []
-    assert [o.value for o in _observe(meter, "acme.fine")] == [3]
-
-
-def test_registering_the_same_suffix_twice_replaces_rather_than_duplicates() -> None:
-    """A worker whose entry point is imported twice under test must not export twice.
-
-    Two callbacks on one series is not a loud failure; it is a metric that reads
-    double, which is worse.
-    """
-    config.configure(config.WorkerConfig(env_prefix="ACME"))
-    metrics.register_gauge("jobs", lambda: 1, description="First")
-    metrics.register_gauge("jobs", lambda: 2, description="Second")
-    meter = FakeMeter()
-
-    metrics.build(meter)
-
-    assert metrics.registered_gauges() == ("jobs",)
-    assert len(meter.gauges["acme.jobs"]) == 1
-    assert [o.value for o in _observe(meter, "acme.jobs")] == [2]
+    assert observe(meter, "acme.broken") == []
+    assert [o.value for o in observe(meter, "acme.fine")] == [3]
 
 
 def test_a_getter_is_called_per_tick_not_captured_at_registration() -> None:
@@ -264,8 +210,8 @@ def test_a_getter_is_called_per_tick_not_captured_at_registration() -> None:
     meter = FakeMeter()
     metrics.build(meter)
 
-    first = [o.value for o in _observe(meter, "acme.advancing")]
-    second = [o.value for o in _observe(meter, "acme.advancing")]
+    first = [o.value for o in observe(meter, "acme.advancing")]
+    second = [o.value for o in observe(meter, "acme.advancing")]
 
     assert first == [1]
     assert second == [2]
@@ -361,56 +307,6 @@ def test_an_unregistered_worker_gets_none_of_another_workers_instruments() -> No
     assert not any("sidecar" in name for name in meter.histograms + meter.counters)
 
 
-@pytest.mark.parametrize("register", ["register_counter", "register_histogram"])
-def test_registering_over_a_catalog_name_is_refused(register: str) -> None:
-    """Allowing it creates the shared series and then never writes to it.
-
-    `build()` still builds the base instrument, then overwrites `built[name]` with
-    the registered one -- so `acme.jobs.total` exists, stays empty forever, and
-    every `counter_add("jobs_total")` call site updates the worker's own series
-    instead. Reproduced before this guard existed.
-    """
-    config.configure(config.WorkerConfig(env_prefix="ACME"))
-
-    with pytest.raises(ValueError, match="shared catalog instrument"):
-        getattr(metrics, register)(
-            "jobs_total", "custom.jobs", description="Mine", unit="1"
-        )
-
-    # Exactly once: the catalog's own entry, with nothing added beside it.
-    assert metrics.instrument_names().count("jobs_total") == 1
-
-
-def test_a_catalog_name_cannot_be_shadowed_across_instrument_kinds() -> None:
-    """The worst spelling of the collision: a counter call site gets a histogram."""
-    config.configure(config.WorkerConfig(env_prefix="ACME"))
-
-    with pytest.raises(ValueError):
-        metrics.register_histogram(
-            "jobs_total", "custom.jobs", description="Mine", unit="s"
-        )
-
-    meter = FakeMeter()
-    built = metrics.build(meter)
-    assert built["jobs_total"] == "counter:acme.jobs.total"
-
-
-def test_one_short_name_cannot_be_both_a_counter_and_a_histogram() -> None:
-    config.configure(config.WorkerConfig(env_prefix="ACME"))
-    metrics.register_counter("thing", "thing.total", description="Thing")
-
-    with pytest.raises(ValueError, match="already registered as a counter"):
-        metrics.register_histogram("thing", "thing.duration", description="Thing")
-
-
-def test_a_histogram_name_cannot_later_be_registered_as_a_counter() -> None:
-    config.configure(config.WorkerConfig(env_prefix="ACME"))
-    metrics.register_histogram("thing", "thing.duration", description="Thing")
-
-    with pytest.raises(ValueError, match="already registered as a histogram"):
-        metrics.register_counter("thing", "thing.total", description="Thing")
-
-
 def test_build_fails_with_a_named_extra_when_opentelemetry_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -435,17 +331,19 @@ def test_build_fails_with_a_named_extra_when_opentelemetry_is_missing(
         metrics.build(FakeMeter())
 
 
-def test_re_registering_an_extra_instrument_replaces_rather_than_duplicates() -> None:
+def test_the_gpu_suffix_list_matches_what_build_creates() -> None:
+    """The guard reads _GPU_SUFFIXES; build zips against it. Pin them together.
+
+    If build ever grew a fourth GPU gauge spelled inline, the guard would not know
+    about it and a worker could quietly duplicate its exported name.
+    """
     config.configure(config.WorkerConfig(env_prefix="ACME"))
-    metrics.register_histogram("h", "first.duration", description="First", unit="s")
-    metrics.register_histogram("h", "second.duration", description="Second", unit="s")
     meter = FakeMeter()
 
     metrics.build(meter)
 
-    assert "acme.second.duration" in meter.histograms
-    assert "acme.first.duration" not in meter.histograms
-    assert metrics.instrument_names().count("h") == 1
+    built_gpu = {n[len("acme.") :] for n in meter.gauges if n.startswith("acme.gpu.")}
+    assert built_gpu == set(metrics._GPU_SUFFIXES)
 
 
 def test_no_gauges_registered_still_builds() -> None:

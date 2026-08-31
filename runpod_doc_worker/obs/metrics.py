@@ -84,6 +84,16 @@ _HISTOGRAMS: tuple[tuple[str, str, str, str], ...] = (
 # every adopter is registered by the worker that has it -- see `register_counter`
 # and `register_histogram`.
 
+# The GPU gauges `build` always creates. Named here rather than only inside
+# `build` so the duplicate-suffix guard can see them: a registered gauge reusing
+# one of these suffixes would otherwise be created twice under the same exported
+# name.
+_GPU_SUFFIXES: tuple[str, ...] = (
+    "gpu.memory_used_bytes",
+    "gpu.memory_total_bytes",
+    "gpu.utilization_percent",
+)
+
 _extra_counters: dict[str, tuple[str, str, str]] = {}
 _extra_histograms: dict[str, tuple[str, str, str]] = {}
 
@@ -118,6 +128,51 @@ def _refuse_shadowing(name: str, kind: str) -> None:
         )
 
 
+def _suffix_owners(*, skip: tuple[str, str] | None = None) -> dict[str, str]:
+    """Every exported suffix currently claimed, mapped to what claims it.
+
+    ``skip`` is the ``(kind, key)`` of an entry being replaced, so re-registering
+    a name with the suffix it already has is not a collision with itself.
+
+    Short names and exported suffixes are separate namespaces, and guarding only
+    the first is not enough: distinct short names pointing at one suffix produce
+    two instruments with the same exported name. Downstream that is not an error,
+    which is what makes it worth refusing here -- the samples merge or become
+    indistinguishable depending on the backend, and nothing reports a problem.
+    """
+    owners: dict[str, str] = {}
+    for key, suffix, *_ in _COUNTERS:
+        if skip != ("catalog", key):
+            owners[suffix] = f"the shared catalog counter {key!r}"
+    for key, suffix, *_ in _HISTOGRAMS:
+        if skip != ("catalog", key):
+            owners[suffix] = f"the shared catalog histogram {key!r}"
+    for suffix in _GPU_SUFFIXES:
+        owners[suffix] = "a built-in GPU gauge"
+    for key, (suffix, *_) in _extra_counters.items():
+        if skip != ("counter", key):
+            owners[suffix] = f"the registered counter {key!r}"
+    for key, (suffix, *_) in _extra_histograms.items():
+        if skip != ("histogram", key):
+            owners[suffix] = f"the registered histogram {key!r}"
+    for suffix in _gauges:
+        if skip != ("gauge", suffix):
+            owners[suffix] = "a registered gauge"
+    return owners
+
+
+def _refuse_duplicate_suffix(suffix: str, kind: str, key: str) -> None:
+    """Refuse an exported suffix something else already produces."""
+    owner = _suffix_owners(skip=(kind, key)).get(suffix)
+    if owner is not None:
+        raise ValueError(
+            f"suffix {suffix!r} is already exported by {owner}. Two instruments "
+            f"sharing one exported name is not an error downstream -- the samples "
+            f"merge or become indistinguishable, with nothing reporting it. "
+            f"Pick a suffix of your own."
+        )
+
+
 def register_counter(
     name: str, suffix: str, *, description: str, unit: str = "1"
 ) -> None:
@@ -128,6 +183,7 @@ def register_counter(
     shared catalog owns, or one already registered as a histogram, is refused.
     """
     _refuse_shadowing(name, "counter")
+    _refuse_duplicate_suffix(suffix, "counter", name)
     _extra_counters[name] = (suffix, description, unit)
 
 
@@ -140,6 +196,7 @@ def register_histogram(
     ``sidecar.startup.duration``, and a worker that does not should not have it.
     """
     _refuse_shadowing(name, "histogram")
+    _refuse_duplicate_suffix(suffix, "histogram", name)
     _extra_histograms[name] = (suffix, description, unit)
 
 
@@ -189,8 +246,10 @@ def register_gauge(
 
     Call at boot, before the exporter is built. Registering the same suffix twice
     replaces the getter rather than exporting the series twice, so a worker that
-    re-imports its entry point under test does not accumulate duplicates.
+    re-imports its entry point under test does not accumulate duplicates. A suffix
+    a catalog instrument or a built-in GPU gauge already exports is refused.
     """
+    _refuse_duplicate_suffix(suffix, "gauge", suffix)
     _gauges[suffix] = (description, unit, getter)
 
 
@@ -283,10 +342,16 @@ def build(meter: Any) -> dict[str, Any]:
             unit=unit,
         )
 
-    for suffix, callback, description, unit in (
-        ("gpu.memory_used_bytes", _observe_gpu_mem_used, "GPU memory in use", "By"),
-        ("gpu.memory_total_bytes", _observe_gpu_mem_total, "GPU memory total", "By"),
-        ("gpu.utilization_percent", _observe_gpu_util, "GPU SM utilization", "%"),
+    # Zipped against _GPU_SUFFIXES rather than repeating the suffixes, so the
+    # duplicate-suffix guard and the builder cannot drift apart.
+    for suffix, (callback, description, unit) in zip(
+        _GPU_SUFFIXES,
+        (
+            (_observe_gpu_mem_used, "GPU memory in use", "By"),
+            (_observe_gpu_mem_total, "GPU memory total", "By"),
+            (_observe_gpu_util, "GPU SM utilization", "%"),
+        ),
+        strict=True,
     ):
         meter.create_observable_gauge(
             f"{prefix}.{suffix}",

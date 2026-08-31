@@ -140,6 +140,58 @@ def test_a_negative_integer_too_large_for_a_float_is_also_caught(
         getattr(coerce, validator)("t", -HUGE_INT)
 
 
+@pytest.mark.parametrize("validator", ["fraction", "positive_number"])
+def test_an_integer_past_the_str_conversion_limit_stays_in_the_contract(
+    validator: str,
+) -> None:
+    """A regression introduced by the first fix for this, and worth its own test.
+
+    Python caps integer-to-string conversion at 4300 digits by default, so the
+    error formatter's own `len(str(value))` raised an unprefixed ValueError for
+    `10**5000` -- putting the caller straight back outside the contract the
+    conversion guard exists to keep them inside.
+    """
+    with pytest.raises(ValueError) as caught:
+        getattr(coerce, validator)("t", 10**5000)
+
+    assert str(caught.value).startswith("input validation failed: ")
+
+
+def test_the_digit_count_is_reported_without_stringifying_the_value() -> None:
+    """Derived from bit_length, so there is no 4300-digit ceiling to trip over."""
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", 10**5000)
+
+    assert "5001-digit" in str(caught.value)
+
+
+def test_the_digit_count_is_exact_for_a_representable_boundary() -> None:
+    """bit_length * 643 // 2136 + 1 is log10(2) in integer arithmetic.
+
+    Asserted against a value whose digit count is known independently, so a
+    sloppier approximation cannot pass.
+    """
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", 10**400)
+
+    assert "401-digit" in str(caught.value)
+
+
+def test_one_of_does_not_refuse_false_and_the_docs_must_not_claim_it_does() -> None:
+    """The asymmetry the reference used to get wrong.
+
+    `True` is truthy, so it reaches the membership check and is refused. `False` is
+    falsey, so it is treated as absent and selects the default. Pinned because the
+    reference documentation asserted that every validator here refuses booleans,
+    which was true of the numeric three and not of this one.
+    """
+    allowed = frozenset({"fast", "accurate"})
+
+    assert coerce.one_of("mode", False, allowed, "accurate") == "accurate"
+    with pytest.raises(ValueError):
+        coerce.one_of("mode", True, allowed, "accurate")
+
+
 def test_a_large_but_representable_integer_still_works() -> None:
     """The guard must not reject numbers a float can hold."""
     assert coerce.positive_number("r", 10**300) == float(10**300)
