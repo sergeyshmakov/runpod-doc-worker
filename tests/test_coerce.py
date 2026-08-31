@@ -177,6 +177,82 @@ def test_the_digit_count_is_exact_for_a_representable_boundary() -> None:
     assert "401-digit" in str(caught.value)
 
 
+# -----------------------------------------------------------------------------
+# Every rejection message, not just the conversion
+# -----------------------------------------------------------------------------
+#
+# Fixing the conversion in _as_float was not enough. `bounded_int` never calls it,
+# and `one_of` formats whatever it was handed, so both still interpolated a raw
+# integer -- and past 4300 digits that interpolation raises an unprefixed
+# ValueError of its own. Every message that carries a caller value now goes
+# through `_describe`.
+
+BEYOND_STR_LIMIT = 10**5000
+
+
+def test_bounded_int_out_of_range_keeps_the_prefix_for_a_huge_integer() -> None:
+    with pytest.raises(ValueError) as caught:
+        coerce.bounded_int("n", BEYOND_STR_LIMIT, low=1, high=10)
+
+    assert str(caught.value).startswith(PREFIX)
+    assert "5001-digit integer" in str(caught.value)
+
+
+def test_one_of_keeps_the_prefix_for_a_huge_integer() -> None:
+    with pytest.raises(ValueError) as caught:
+        coerce.one_of("mode", BEYOND_STR_LIMIT, frozenset({"fast"}), "fast")
+
+    assert str(caught.value).startswith(PREFIX)
+    assert "5001-digit integer" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: coerce.bounded_int("n", BEYOND_STR_LIMIT, low=1, high=10),
+        lambda: coerce.one_of("m", BEYOND_STR_LIMIT, frozenset({"a"}), "a"),
+        lambda: coerce.fraction("t", BEYOND_STR_LIMIT),
+        lambda: coerce.positive_number("t", BEYOND_STR_LIMIT),
+    ],
+)
+def test_no_rejection_path_stringifies_an_unbounded_integer(call) -> None:
+    """One test over every entry point, so a new message cannot skip the helper."""
+    with pytest.raises(ValueError) as caught:
+        call()
+
+    message = str(caught.value)
+    assert message.startswith(PREFIX), message[:90]
+    assert "Exceeds the limit" not in message
+
+
+def test_a_negative_huge_integer_is_described_as_negative() -> None:
+    with pytest.raises(ValueError) as caught:
+        coerce.bounded_int("n", -BEYOND_STR_LIMIT, low=1, high=10)
+
+    assert "negative 5001-digit integer" in str(caught.value)
+
+
+def test_an_ordinary_value_is_still_shown_verbatim() -> None:
+    """The safe formatter must not degrade the common case into vagueness."""
+    with pytest.raises(ValueError) as caught:
+        coerce.bounded_int("n", 42, low=1, high=10)
+    assert "got 42" in str(caught.value)
+
+    with pytest.raises(ValueError) as caught:
+        coerce.one_of("mode", "turbo", frozenset({"fast"}), "fast")
+    assert "got 'turbo'" in str(caught.value)
+
+
+def test_a_very_long_value_is_truncated_rather_than_echoed() -> None:
+    """The response has a delivery cap, and the caller already has their input."""
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", "x" * 5000)
+
+    message = str(caught.value)
+    assert len(message) < 300, len(message)
+    assert message.endswith("...")
+
+
 def test_one_of_does_not_refuse_false_and_the_docs_must_not_claim_it_does() -> None:
     """The asymmetry the reference used to get wrong.
 
