@@ -271,6 +271,109 @@ def test_a_getter_is_called_per_tick_not_captured_at_registration() -> None:
     assert second == [2]
 
 
+# -----------------------------------------------------------------------------
+# The base catalog is the intersection, not the union
+# -----------------------------------------------------------------------------
+
+# Every metric suffix the two workers written before this package existed export,
+# transcribed from their own catalogs. They arrived at these independently and
+# spelled all 13 identically, which is the evidence that they are shared rather
+# than one worker's choices promoted to everyone's.
+SHARED_SUFFIXES = frozenset({
+    "jobs.total",
+    "pages.total",
+    "bytes_in.total",
+    "bytes_out.total",
+    "errors.total",
+    "worker.cold_starts.total",
+    "worker.refresh.total",
+    "degraded.total",
+    "job.duration",
+    "phase.duration",
+    "pages_per_second",
+    "input.size_bytes",
+    "output.size_bytes",
+    "worker.warmup.duration",
+    "gpu.memory_used_bytes",
+    "gpu.memory_total_bytes",
+    "gpu.utilization_percent",
+})
+
+
+def test_the_base_catalog_holds_only_what_every_adopter_shares() -> None:
+    """A suffix here that some workers do not measure is a bug, not a bonus.
+
+    A sidecar startup histogram was in the base list at first. Only some document
+    workers run a sidecar -- one of the two existing ones does not, and neither
+    will a pipeline-based engine -- so those workers would have been handed an
+    instrument that can only ever export an empty series. Anything not universal
+    belongs behind `register_counter` / `register_histogram`.
+    """
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    meter = FakeMeter()
+
+    metrics.build(meter)
+
+    built_suffixes = {
+        name[len("acme.") :]
+        for name in meter.counters + meter.histograms + list(meter.gauges)
+    }
+    unshared = built_suffixes - SHARED_SUFFIXES
+    assert not unshared, (
+        f"the base catalog exports {sorted(unshared)}, which not every adopting "
+        f"worker measures. Register it from the worker that has it instead."
+    )
+
+
+def test_a_worker_can_add_an_instrument_the_others_do_not_have() -> None:
+    """The sidecar case: registered by the workers that run one, absent elsewhere."""
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    metrics.register_histogram(
+        "sidecar_startup_duration",
+        "sidecar.startup.duration",
+        description="Time for an engine sidecar to report ready",
+        unit="s",
+    )
+    metrics.register_counter(
+        "sidecar_restarts_total", "sidecar.restarts.total", description="Restarts"
+    )
+    meter = FakeMeter()
+
+    built = metrics.build(meter)
+
+    assert "acme.sidecar.startup.duration" in meter.histograms
+    assert "acme.sidecar.restarts.total" in meter.counters
+    # Addressable by short name, exactly like a base instrument -- otherwise a
+    # call site would have to know whether its metric came from the catalog or
+    # from its own registration.
+    assert "sidecar_startup_duration" in built
+    assert "sidecar_restarts_total" in built
+    assert set(built) == set(metrics.instrument_names())
+
+
+def test_an_unregistered_worker_gets_none_of_another_workers_instruments() -> None:
+    """Registration is per-process state, so it must not leak between workers."""
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    meter = FakeMeter()
+
+    metrics.build(meter)
+
+    assert not any("sidecar" in name for name in meter.histograms + meter.counters)
+
+
+def test_re_registering_an_extra_instrument_replaces_rather_than_duplicates() -> None:
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    metrics.register_histogram("h", "first.duration", description="First", unit="s")
+    metrics.register_histogram("h", "second.duration", description="Second", unit="s")
+    meter = FakeMeter()
+
+    metrics.build(meter)
+
+    assert "acme.second.duration" in meter.histograms
+    assert "acme.first.duration" not in meter.histograms
+    assert metrics.instrument_names().count("h") == 1
+
+
 def test_no_gauges_registered_still_builds() -> None:
     """A worker with no state gauges at all -- docling has no sidecar -- is valid."""
     config.configure(config.WorkerConfig(env_prefix="ACME"))

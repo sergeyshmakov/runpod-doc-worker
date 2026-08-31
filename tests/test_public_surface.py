@@ -38,7 +38,9 @@ PUBLIC = {
     "runpod_doc_worker.obs.metrics": (
         "build",
         "instrument_names",
+        "register_counter",
         "register_gauge",
+        "register_histogram",
         "registered_gauges",
     ),
     "runpod_doc_worker.obs.redact": ("compact", "compact_url"),

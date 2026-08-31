@@ -30,7 +30,9 @@ from runpod_doc_worker import config
 __all__ = [
     "build",
     "instrument_names",
+    "register_counter",
     "register_gauge",
+    "register_histogram",
     "registered_gauges",
 ]
 
@@ -69,13 +71,44 @@ _HISTOGRAMS: tuple[tuple[str, str, str, str], ...] = (
         "Boot-time warmup duration",
         "s",
     ),
-    (
-        "sidecar_startup_duration",
-        "sidecar.startup.duration",
-        "Time for an engine sidecar to report ready",
-        "s",
-    ),
 )
+
+# The two lists above are deliberately the *intersection*, not the union, of what
+# the adopting workers measure. Both workers written before this package existed
+# arrived at these 13 suffixes independently and spelled every one of them
+# identically, which is the evidence that they belong here.
+#
+# A sidecar startup histogram was in this list at first, and it was wrong: only
+# some document workers run a sidecar, and the others would have been handed an
+# instrument that can only ever export an empty series. Anything not shared by
+# every adopter is registered by the worker that has it -- see `register_counter`
+# and `register_histogram`.
+
+_extra_counters: dict[str, tuple[str, str, str]] = {}
+_extra_histograms: dict[str, tuple[str, str, str]] = {}
+
+
+def register_counter(
+    name: str, suffix: str, *, description: str, unit: str = "1"
+) -> None:
+    """Add a counter this worker measures and others do not.
+
+    ``name`` is the short name call sites pass; ``suffix`` is appended to the
+    namespace. Registering an existing name replaces it rather than creating the
+    series twice.
+    """
+    _extra_counters[name] = (suffix, description, unit)
+
+
+def register_histogram(
+    name: str, suffix: str, *, description: str, unit: str = "1"
+) -> None:
+    """Add a histogram this worker measures and others do not.
+
+    The case this exists for: a worker that runs an engine sidecar wants
+    ``sidecar.startup.duration``, and a worker that does not should not have it.
+    """
+    _extra_histograms[name] = (suffix, description, unit)
 
 
 def instrument_names() -> tuple[str, ...]:
@@ -85,8 +118,11 @@ def instrument_names() -> tuple[str, ...]:
     does not build — which would otherwise no-op in production behind a one-shot
     warning.
     """
-    return tuple(name for name, *_ in _COUNTERS) + tuple(
-        name for name, *_ in _HISTOGRAMS
+    return (
+        tuple(name for name, *_ in _COUNTERS)
+        + tuple(name for name, *_ in _HISTOGRAMS)
+        + tuple(_extra_counters)
+        + tuple(_extra_histograms)
     )
 
 
@@ -171,6 +207,14 @@ def build(meter: Any) -> dict[str, Any]:
             f"{prefix}.{suffix}", description=description, unit=unit
         )
     for name, suffix, description, unit in _HISTOGRAMS:
+        built[name] = meter.create_histogram(
+            f"{prefix}.{suffix}", description=description, unit=unit
+        )
+    for name, (suffix, description, unit) in _extra_counters.items():
+        built[name] = meter.create_counter(
+            f"{prefix}.{suffix}", description=description, unit=unit
+        )
+    for name, (suffix, description, unit) in _extra_histograms.items():
         built[name] = meter.create_histogram(
             f"{prefix}.{suffix}", description=description, unit=unit
         )
@@ -291,3 +335,5 @@ def _reset_for_tests() -> None:
     _nvml_init_attempted = False
     _nvml_handles.clear()
     _gauges.clear()
+    _extra_counters.clear()
+    _extra_histograms.clear()
