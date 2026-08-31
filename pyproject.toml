@@ -56,6 +56,12 @@ s3 = [
 ]
 test = [
     "pytest>=7",
+    # Test-only. `obs.metrics` never imports opentelemetry at module scope: the
+    # consumer supplies the meter, and `Observation` is imported inside the gauge
+    # callbacks. Tests need it to assert what those callbacks yield, which is
+    # where the "a getter that raises loses its series, not the pipeline"
+    # behaviour lives. The api package alone -- not the sdk.
+    "opentelemetry-api>=1.20",
 ]
 
 [tool.hatch.build.targets.wheel]

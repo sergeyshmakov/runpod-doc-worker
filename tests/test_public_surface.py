@@ -35,7 +35,20 @@ PUBLIC = {
         "job_id_var",
         "warning",
     ),
+    "runpod_doc_worker.obs.metrics": (
+        "build",
+        "instrument_names",
+        "register_gauge",
+        "registered_gauges",
+    ),
     "runpod_doc_worker.obs.redact": ("compact", "compact_url"),
+    "runpod_doc_worker.contract.coerce": (
+        "bounded_int",
+        "fail",
+        "fraction",
+        "one_of",
+        "positive_number",
+    ),
     "runpod_doc_worker.contract.artifacts": (
         "Artifact",
         "ArtifactError",
