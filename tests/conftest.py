@@ -7,6 +7,7 @@ import os
 import pytest
 
 from runpod_doc_worker import config
+from runpod_doc_worker.obs import metrics
 
 
 # Tests should not see any operator credentials.
@@ -20,7 +21,17 @@ def _default_config():
 
     The active config is process-wide, so a test that installs one would
     otherwise leak it into whatever runs next.
+
+    The metric registries are the same class of state and reset here for the same
+    reason. They live in this fixture rather than in the metrics test files because
+    a leaked registration is not a local failure: a worker instrument registered by
+    one test changes what `build()` produces for every test after it, and the
+    failure surfaces somewhere unrelated. That happened while splitting those files
+    -- three tests that pass alone failed together, because the reset had been
+    deleted along with a neighbouring block.
     """
     config.reset()
+    metrics._reset_for_tests()
     yield
     config.reset()
+    metrics._reset_for_tests()

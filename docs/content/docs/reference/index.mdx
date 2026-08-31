@@ -149,6 +149,90 @@ From `runpod_doc_worker.obs.redact`:
 - `compact(text, *, limit=2000)`
 - `compact_url(url)`
 
+## Metrics
+
+From `runpod_doc_worker.obs.metrics`:
+
+- `build(meter)`
+- `instrument_names()`
+- `register_counter(name, suffix, *, description, unit="1")`
+- `register_histogram(name, suffix, *, description, unit="1")`
+- `register_gauge(suffix, getter, *, description, unit="1")`
+- `registered_gauges()`
+
+Requires the `metrics` extra: `pip install "runpod-doc-worker[metrics]"`. The
+package does not depend on OpenTelemetry otherwise, and `build()` raises a
+`RuntimeError` naming this extra if the API is missing rather than losing gauge
+observations silently on the first export tick.
+
+`build(meter)` creates every instrument on a meter the consumer supplies and
+returns the counters and histograms keyed by short name. Observable gauges are
+not returned — they are pull-based and nothing addresses them by name. Every
+exported name is `<metric_namespace>.<suffix>`; see
+[`metric_namespace`](/docs/getting-started/configuration#metric-namespace).
+
+The base catalog is the set of measurements shared by every document worker:
+`jobs.total`, `pages.total`, `bytes_in.total`, `bytes_out.total`, `errors.total`,
+`degraded.total`, `worker.cold_starts.total`, `worker.refresh.total`,
+`job.duration`, `phase.duration`, `pages_per_second`, `input.size_bytes`,
+`output.size_bytes`, `worker.warmup.duration`, and the three
+`gpu.*` gauges.
+
+Anything a worker measures that others do not — a sidecar's startup duration, for
+instance — is registered by that worker. Registration is guarded on both
+namespaces, which are separate:
+
+- **Short names** — the key a call site passes. `register_counter` and
+  `register_histogram` refuse a name the base catalog owns, and refuse to register
+  one name as both kinds. Allowing either would build the shared series and then
+  never write to it, while call sites addressing that name wrote elsewhere.
+- **Exported suffixes** — the published metric name. All three registration
+  functions refuse a suffix already exported by a catalog instrument, a built-in
+  GPU gauge, or another registration. Two instruments under one exported name is
+  not an error downstream: the samples merge or become indistinguishable depending
+  on the backend, and nothing reports it.
+
+`register_gauge` takes a callable read on each export tick. Returning `None` skips
+that tick, which is how a worker reports "not applicable" without a sentinel — a
+readiness gauge on a worker with no sidecar should report nothing rather than `0`,
+since `0` means configured and broken.
+
+## Input coercion
+
+From `runpod_doc_worker.contract.coerce`:
+
+- `fail(message)`
+- `fraction(name, value)`
+- `positive_number(name, value)`
+- `bounded_int(name, value, *, low, high)`
+- `one_of(field, value, allowed, default)`
+
+Single-value validators. Each returns a normalised value or raises `ValueError`
+prefixed `input validation failed: `, which is the prefix a client branches on to
+tell a bad request from a broken worker.
+
+`fraction`, `positive_number` and `bounded_int` refuse booleans explicitly, because
+`isinstance(True, int)` is true in Python and a field set to `true` would otherwise
+normalise to `1`. The two numeric validators also refuse NaN, infinity, and integers
+too large to convert to a float — JSON bounds none of those, and the conversion
+raises `OverflowError`, which is not a `ValueError` and would escape the contract.
+
+`one_of` behaves differently, in two ways worth knowing before you wrap it:
+
+- **It treats any falsey value as absent**, so `False`, `0`, `""` and `[]` select the
+  default rather than being rejected. It therefore does *not* refuse booleans, and it
+  is asymmetric about them: `True` is truthy, so it reaches the membership check and
+  is refused, while `False` is replaced by the default. A worker that must reject a
+  boolean for an enum-shaped field checks the type before calling this.
+- **A callable `default` that raises propagates unchanged.** When the value is absent,
+  the default's own failure is the failure and it names the operator's misconfigured
+  variable; flattening it into a "not one of" message would hide which variable was
+  malformed. A consumer catching only `ValueError` will not catch it.
+
+Pass a callable `default` wherever resolving the default can itself fail, such as
+reading an environment variable: an eagerly evaluated default rejects jobs that named
+their choice explicitly and could not have been affected by it.
+
 ## Diagnostics
 
 From `runpod_doc_worker.obs.debug`:

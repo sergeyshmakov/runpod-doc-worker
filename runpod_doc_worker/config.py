@@ -82,6 +82,13 @@ class WorkerConfig:
         snapshot paths for, to diagnose a cache that is present but unreadable.
     :param probe_env_keys: Extra env var names to include in the probe's env
         dump, on top of the HuggingFace ones every worker shares.
+    :param metric_namespace: Leading dotted segment of every exported metric
+        name, so ``"acme"`` yields ``acme.jobs.total``. Defaults to
+        ``env_prefix`` lowercased, because those two are the same word in every
+        worker written so far. Every name built from it is a public contract with
+        an operator's dashboards: changing this renames every series at once and
+        breaks saved queries, so treat it as fixed once an endpoint is live.
+        See :mod:`runpod_doc_worker.obs.metrics`.
     :param log_mirror: Optional second sink for log records, called as
         ``(level, msg, fields)`` after the stdout line is written. A worker with
         its own telemetry export registers it here; see
@@ -95,6 +102,18 @@ class WorkerConfig:
     probe_model_ids: tuple[str, ...] = ()
     probe_env_keys: tuple[str, ...] = field(default=())
     log_mirror: Callable[[str, str, dict], None] | None = None
+    metric_namespace: str = ""
+
+    def metrics_prefix(self) -> str:
+        """The leading segment for exported metric names.
+
+        Falls back to ``env_prefix`` lowercased rather than to a literal, so a
+        worker that sets only ``env_prefix`` still gets its own namespace instead
+        of sharing one called ``worker`` with every other adopter — two workers
+        exporting to the same collector under the same series names would add
+        their counters together silently.
+        """
+        return self.metric_namespace or self.env_prefix.lower()
 
     def env_name(self, name: str) -> str:
         """Full env var name for ``name``, for reads and for error messages."""

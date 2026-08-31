@@ -54,8 +54,22 @@ s3 = [
     # Only needed by the `s3` transport in runpod_doc_worker.transport.package.
     "boto3>=1.35",
 ]
+metrics = [
+    # Needed by `runpod_doc_worker.obs.metrics`. Not a runtime dependency of the
+    # package as a whole: a worker that exports no metrics should not carry it,
+    # which is why this mirrors the `s3` extra rather than going into `dependencies`.
+    #
+    # It is a real dependency of that module, though, and it was wrong to leave it
+    # declared test-only. Every gauge callback yields an `Observation`, and those
+    # callbacks run on the export tick rather than the request path -- so a missing
+    # install is not an error a consumer sees, it is every gauge series quietly
+    # vanishing. `build()` now resolves the import once and fails with a message
+    # naming this extra. The api package alone -- not the sdk.
+    "opentelemetry-api>=1.20",
+]
 test = [
     "pytest>=7",
+    "runpod-doc-worker[metrics]",
 ]
 
 [tool.hatch.build.targets.wheel]

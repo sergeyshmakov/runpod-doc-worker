@@ -32,6 +32,27 @@ configure(
 | `probe_model_ids` | `()` | Model IDs whose snapshots diagnostics should resolve |
 | `probe_env_keys` | `()` | Extra environment names and values included in probe output |
 | `log_mirror` | `None` | Optional callback that receives each log record after stdout |
+| `metric_namespace` | `env_prefix.lower()` | Leading segment of every exported metric name |
+
+### Metric namespace
+
+`metric_namespace` is the first dotted segment of every name
+[`obs.metrics`](/docs/reference#metrics) exports, so `"acme"` produces
+`acme.jobs.total`. Left unset it falls back to `env_prefix` lowercased.
+
+<Callout type="warn">
+  Every name built from this is a public contract with an operator's dashboards.
+  Changing it renames every series at once and breaks saved queries, so set it
+  once, before an endpoint is live, and treat it as fixed afterwards.
+
+  A worker adopting this package from its own metric catalog should set
+  `metric_namespace` to whatever prefix it already exports, or its dashboards
+  move.
+</Callout>
+
+Two workers reporting to one collector under the same namespace add their
+counters together, and nothing anywhere reports a problem — which is why the
+fallback is derived from `env_prefix` rather than from a shared literal.
 
 ## Prefixed environment variables
 
