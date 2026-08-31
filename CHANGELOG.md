@@ -1,3 +1,9 @@
+## [0.8.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.2...v0.8.0) (2026-08-31)
+
+### Features
+
+* share the metric catalog and the single-value input validators ([#13](https://github.com/sergeyshmakov/runpod-doc-worker/issues/13)) ([5b900c8](https://github.com/sergeyshmakov/runpod-doc-worker/commit/5b900c8932818834399b86ffb974d08604a0b657))
+
 ## [0.7.2](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.1...v0.7.2) (2026-08-27)
 
 ### Bug Fixes
