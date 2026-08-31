@@ -88,15 +88,46 @@ _extra_counters: dict[str, tuple[str, str, str]] = {}
 _extra_histograms: dict[str, tuple[str, str, str]] = {}
 
 
+def _refuse_shadowing(name: str, kind: str) -> None:
+    """Refuse a short name the catalog or the other registration map already owns.
+
+    Silently allowing it is worse than it first looks. ``build()`` still creates
+    the base instrument, then overwrites ``built[name]`` with the registered one --
+    so the canonical shared series is created and never written to again, while
+    every call site addressing that name updates the worker's own series instead.
+    Across kinds it is worse still: registering a histogram under a counter's name
+    hands ``counter_add`` a histogram, and ``instrument_names()`` reports the name
+    twice.
+
+    A ValueError rather than a `fail()`: this is a worker's own boot-time wiring
+    mistake, not caller input, and it should stop the worker rather than degrade it.
+    """
+    reserved = {n for n, *_ in _COUNTERS} | {n for n, *_ in _HISTOGRAMS}
+    if name in reserved:
+        raise ValueError(
+            f"{name!r} is a shared catalog instrument and cannot be re-registered "
+            f"as {kind}. Registering it would leave the shared series empty while "
+            f"call sites wrote to yours. Pick a name of your own."
+        )
+    other = _extra_histograms if kind == "counter" else _extra_counters
+    if name in other:
+        raise ValueError(
+            f"{name!r} is already registered as "
+            f"{'a histogram' if kind == 'counter' else 'a counter'}. One short name "
+            f"cannot be both, or a call site gets the wrong instrument kind."
+        )
+
+
 def register_counter(
     name: str, suffix: str, *, description: str, unit: str = "1"
 ) -> None:
     """Add a counter this worker measures and others do not.
 
     ``name`` is the short name call sites pass; ``suffix`` is appended to the
-    namespace. Registering an existing name replaces it rather than creating the
-    series twice.
+    namespace. Re-registering the same name as a counter replaces it; a name the
+    shared catalog owns, or one already registered as a histogram, is refused.
     """
+    _refuse_shadowing(name, "counter")
     _extra_counters[name] = (suffix, description, unit)
 
 
@@ -108,6 +139,7 @@ def register_histogram(
     The case this exists for: a worker that runs an engine sidecar wants
     ``sidecar.startup.duration``, and a worker that does not should not have it.
     """
+    _refuse_shadowing(name, "histogram")
     _extra_histograms[name] = (suffix, description, unit)
 
 
@@ -167,6 +199,26 @@ def registered_gauges() -> tuple[str, ...]:
     return tuple(sorted(_gauges))
 
 
+def _observation_class() -> Any:
+    """The OpenTelemetry ``Observation`` type, or a clear error naming the extra.
+
+    Every gauge callback in this module yields one of these, and the callbacks run
+    on the export tick rather than on the request path -- so a missing dependency
+    there is not a crash a consumer sees, it is every gauge series silently
+    disappearing. :func:`build` calls this once so the failure lands at boot with
+    a message, instead of at the first tick with none.
+    """
+    try:
+        from opentelemetry.metrics import Observation  # noqa: PLC0415
+    except ImportError as e:  # pragma: no cover - depends on the install
+        raise RuntimeError(
+            "runpod_doc_worker.obs.metrics needs the OpenTelemetry API to build "
+            "instruments. Install `runpod-doc-worker[metrics]`, or the package "
+            "that provides the meter you are passing to build()."
+        ) from e
+    return Observation
+
+
 def _observe_registered(getter: _GaugeGetter) -> Callable[[Any], Iterator[Any]]:
     """Wrap a getter as an OpenTelemetry gauge callback.
 
@@ -198,7 +250,11 @@ def build(meter: Any) -> dict[str, Any]:
 
     Only counters and histograms are returned. Observable gauges are pull-based:
     the meter holds the callback and nothing calls them by name.
+
+    Raises ``RuntimeError`` if the OpenTelemetry API is missing, rather than
+    letting every gauge callback fail on the export tick where nothing reports it.
     """
+    _observation_class()
     prefix = config.active().metrics_prefix()
     built: dict[str, Any] = {}
 

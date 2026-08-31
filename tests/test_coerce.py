@@ -86,6 +86,65 @@ def test_fraction_refuses_infinity() -> None:
         coerce.fraction("t", float("inf"))
 
 
+# -----------------------------------------------------------------------------
+# Integers outside the float range
+# -----------------------------------------------------------------------------
+#
+# JSON puts no bound on an integer and Python parses arbitrary precision, so a
+# caller can send one with 309-plus digits. `float()` then raises OverflowError,
+# which is not a ValueError and so escapes every check in this module -- turning
+# malformed job input into an internal worker error instead of the documented
+# rejection. `math.isfinite` cannot catch it: the conversion raises before there
+# is a float to test.
+
+HUGE_INT = 10**400
+
+
+@pytest.mark.parametrize("validator", ["fraction", "positive_number"])
+def test_an_integer_too_large_for_a_float_is_a_validation_error(validator: str) -> None:
+    with pytest.raises(ValueError, match=r"^input validation failed: "):
+        getattr(coerce, validator)("t", HUGE_INT)
+
+
+@pytest.mark.parametrize("validator", ["fraction", "positive_number"])
+def test_an_oversized_integer_does_not_raise_overflowerror(validator: str) -> None:
+    """Asserted separately because OverflowError is not a subclass of ValueError.
+
+    A `pytest.raises(ValueError)` above would report the same failure either way if
+    the two were related; they are not, so this pins the distinction that matters
+    to a caller -- a 400-error envelope rather than a 500.
+    """
+    with pytest.raises(Exception) as caught:  # noqa: PT011 - the type is the assertion
+        getattr(coerce, validator)("t", HUGE_INT)
+
+    assert not isinstance(caught.value, OverflowError)
+    assert isinstance(caught.value, ValueError)
+
+
+def test_the_oversized_integer_message_names_the_field_and_the_scale() -> None:
+    """`{value!r}` on a 400-digit integer would put 400 digits in the response."""
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("layout_threshold", HUGE_INT)
+
+    message = str(caught.value)
+    assert "layout_threshold" in message
+    assert "401-digit" in message
+    assert len(message) < 200, "the message embedded the number itself"
+
+
+@pytest.mark.parametrize("validator", ["fraction", "positive_number"])
+def test_a_negative_integer_too_large_for_a_float_is_also_caught(
+    validator: str,
+) -> None:
+    with pytest.raises(ValueError, match=r"^input validation failed: "):
+        getattr(coerce, validator)("t", -HUGE_INT)
+
+
+def test_a_large_but_representable_integer_still_works() -> None:
+    """The guard must not reject numbers a float can hold."""
+    assert coerce.positive_number("r", 10**300) == float(10**300)
+
+
 def test_fraction_returns_a_float_even_for_an_int() -> None:
     """Downstream does arithmetic on it; an int that stays an int floor-divides."""
     result = coerce.fraction("t", 1)

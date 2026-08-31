@@ -361,6 +361,80 @@ def test_an_unregistered_worker_gets_none_of_another_workers_instruments() -> No
     assert not any("sidecar" in name for name in meter.histograms + meter.counters)
 
 
+@pytest.mark.parametrize("register", ["register_counter", "register_histogram"])
+def test_registering_over_a_catalog_name_is_refused(register: str) -> None:
+    """Allowing it creates the shared series and then never writes to it.
+
+    `build()` still builds the base instrument, then overwrites `built[name]` with
+    the registered one -- so `acme.jobs.total` exists, stays empty forever, and
+    every `counter_add("jobs_total")` call site updates the worker's own series
+    instead. Reproduced before this guard existed.
+    """
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+
+    with pytest.raises(ValueError, match="shared catalog instrument"):
+        getattr(metrics, register)(
+            "jobs_total", "custom.jobs", description="Mine", unit="1"
+        )
+
+    # Exactly once: the catalog's own entry, with nothing added beside it.
+    assert metrics.instrument_names().count("jobs_total") == 1
+
+
+def test_a_catalog_name_cannot_be_shadowed_across_instrument_kinds() -> None:
+    """The worst spelling of the collision: a counter call site gets a histogram."""
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+
+    with pytest.raises(ValueError):
+        metrics.register_histogram(
+            "jobs_total", "custom.jobs", description="Mine", unit="s"
+        )
+
+    meter = FakeMeter()
+    built = metrics.build(meter)
+    assert built["jobs_total"] == "counter:acme.jobs.total"
+
+
+def test_one_short_name_cannot_be_both_a_counter_and_a_histogram() -> None:
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    metrics.register_counter("thing", "thing.total", description="Thing")
+
+    with pytest.raises(ValueError, match="already registered as a counter"):
+        metrics.register_histogram("thing", "thing.duration", description="Thing")
+
+
+def test_a_histogram_name_cannot_later_be_registered_as_a_counter() -> None:
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+    metrics.register_histogram("thing", "thing.duration", description="Thing")
+
+    with pytest.raises(ValueError, match="already registered as a histogram"):
+        metrics.register_counter("thing", "thing.total", description="Thing")
+
+
+def test_build_fails_with_a_named_extra_when_opentelemetry_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail at boot with a message, not at the first export tick with silence.
+
+    The gauge callbacks run off the request path, so a missing dependency there is
+    not an error anyone sees -- it is every gauge series quietly vanishing.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse_opentelemetry(name: str, *args: object, **kwargs: object) -> object:
+        if name.startswith("opentelemetry"):
+            raise ImportError("No module named 'opentelemetry'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_opentelemetry)
+    config.configure(config.WorkerConfig(env_prefix="ACME"))
+
+    with pytest.raises(RuntimeError, match=r"runpod-doc-worker\[metrics\]"):
+        metrics.build(FakeMeter())
+
+
 def test_re_registering_an_extra_instrument_replaces_rather_than_duplicates() -> None:
     config.configure(config.WorkerConfig(env_prefix="ACME"))
     metrics.register_histogram("h", "first.duration", description="First", unit="s")

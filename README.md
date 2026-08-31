@@ -27,8 +27,9 @@ with it — a bare URL cannot carry them:
 runpod-doc-worker[s3] @ https://github.com/sergeyshmakov/runpod-doc-worker/archive/refs/tags/v0.1.0.tar.gz
 ```
 
-Extras: `s3` for the S3 transport (boto3), `test` for the suite. Drop the
-`[s3]` if the worker only returns tarballs or inline payloads.
+Extras: `s3` for the S3 transport (boto3), `metrics` for the metric catalog
+(`opentelemetry-api`), `test` for the suite. Drop `[s3]` if the worker only
+returns tarballs or inline payloads, and `[metrics]` if it exports none.
 
 **Minimum Python is 3.10.12.** Not 3.10: `tarfile` gained the `data` extraction
 filter in that patch release (June 2023), and the response reader depends on it

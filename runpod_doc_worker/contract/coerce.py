@@ -52,6 +52,25 @@ def fail(msg: str) -> None:
     raise ValueError(f"input validation failed: {msg}")
 
 
+def _as_float(name: str, value: Any) -> float:
+    """``float(value)``, with an out-of-range integer kept inside the contract.
+
+    JSON has no integer bound and Python parses arbitrary precision, so a caller
+    can send an integer of 309-plus digits. ``float()`` then raises ``OverflowError``
+    -- not ``ValueError`` -- and it escapes past every check in this module, so
+    malformed job input surfaces as an internal worker error instead of the
+    documented ``input validation failed:`` rejection.
+
+    ``math.isfinite`` cannot catch this: the conversion raises before there is a
+    float to test.
+    """
+    try:
+        return float(value)
+    except OverflowError:
+        fail(f"{name} must be within the range of a float; got a {len(str(value))}-digit integer")
+        raise  # unreachable; `fail` always raises. Present for the type checker.
+
+
 def fraction(name: str, value: Any) -> float:
     """A score threshold or probability: a real number in (0, 1].
 
@@ -61,7 +80,7 @@ def fraction(name: str, value: Any) -> float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         fail(f"{name} must be a number between 0 and 1; got {value!r}")
-    number = float(value)
+    number = _as_float(name, value)
     if not 0.0 < number <= 1.0:
         fail(f"{name} must be greater than 0 and at most 1; got {number}")
     return number
@@ -80,7 +99,7 @@ def positive_number(name: str, value: Any) -> float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         fail(f"{name} must be a positive number; got {value!r}")
-    number = float(value)
+    number = _as_float(name, value)
     if not math.isfinite(number):
         fail(f"{name} must be a finite number; got {number}")
     if number <= 0:
