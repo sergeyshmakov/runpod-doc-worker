@@ -1,3 +1,39 @@
+## [0.9.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.8.1...v0.9.0) (2026-09-01)
+
+### ⚠ BREAKING CHANGES
+
+* **logging:** the JSON log record's message field is renamed from `msg` to
+`message`. A dashboard, alert or saved query selecting on `msg` will stop
+matching and must be updated. The text format is unchanged, as is every
+call site. Approved by the maintainer before committing, per AGENTS.md.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* docs(observability): describe the record shape the emitters now write
+
+The guide listed `msg` among the fields a caller cannot replace, which was the
+old key and is now the parameter name instead. It also did not say what the
+record contains, so the one thing worth knowing -- that the text is under
+`message` because that is what RunPod's viewer reads -- had to be discovered
+from the source.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* docs(logging): correct the record shape in the _format_json docstring
+
+The one-liner still said "Always includes ts, level, logger, msg" while the line
+below it emitted `message`. A docstring describing a record shape is the thing a
+maintainer reads instead of the dict literal, so a stale one sends the next
+reader to build against a field that is no longer written.
+
+Caught in review on the same PR that renamed the key.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+### Bug Fixes
+
+* **logging:** name the JSON message field `message`, as RunPod reads it ([#15](https://github.com/sergeyshmakov/runpod-doc-worker/issues/15)) ([0678193](https://github.com/sergeyshmakov/runpod-doc-worker/commit/0678193357d440224d5738d1ec6ca57a77caa77b))
+
 ## [0.8.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.8.0...v0.8.1) (2026-09-01)
 
 ### Bug Fixes
