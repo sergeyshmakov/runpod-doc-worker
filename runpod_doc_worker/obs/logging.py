@@ -84,7 +84,7 @@ def _render(level: str, msg: str, fields: dict[str, Any]) -> str:
 
 
 def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
-    """Build a one-line JSON record. Always includes ts, level, logger, msg."""
+    """Build a one-line JSON record. Always ts, level, logger and message."""
     now = time.time()
     ms = int((now - int(now)) * 1000)
     record: dict[str, Any] = {
