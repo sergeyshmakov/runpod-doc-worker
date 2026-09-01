@@ -105,7 +105,20 @@ def _describe(value: Any) -> str:
             sign = "negative " if value < 0 else ""
             return f"a {sign}{_int_digits(value)}-digit integer"
         return repr(value)
-    rendered = repr(value)
+    try:
+        rendered = repr(value)
+    except ValueError:
+        # An oversized integer *nested* inside a container. The guard above only
+        # sees a top-level one, and `repr` recurses -- so `[10**5000]` stringifies
+        # the element and raises the same unprefixed ValueError the guard exists
+        # to prevent. Catching it here covers any depth and any container without
+        # walking the structure, which is what a hand-rolled recursion would get
+        # wrong for the next shape nobody thought of.
+        return f"a {type(value).__name__} containing an oversized integer"
+    except Exception:  # noqa: BLE001
+        # A caller-supplied object whose own __repr__ raises. Nothing else in this
+        # module would survive it either, and a rejection must not become a crash.
+        return f"a {type(value).__name__}"
     if len(rendered) > _MAX_DESCRIBED_CHARS:
         return rendered[: _MAX_DESCRIBED_CHARS - 3] + "..."
     return rendered
@@ -210,6 +223,12 @@ def one_of(
     to work around it, which was the one thing that did not help.
     """
     chosen = value if value else (default() if callable(default) else default)
-    if chosen not in allowed:
+    # The type check comes first and short-circuits, which is the whole point.
+    # `allowed` is a set of strings, so a truthy non-string is invalid by
+    # definition -- and a list or dict is *unhashable*, so the membership test on
+    # its own raised a bare `TypeError` rather than rejecting. A JSON body can
+    # carry either at any enum-shaped field, which made it a plain route out of
+    # the rejection envelope.
+    if not isinstance(chosen, str) or chosen not in allowed:
         fail(f"{field} must be one of {sorted(allowed)}; got {_describe(chosen)}")
     return chosen
