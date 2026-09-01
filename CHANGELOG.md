@@ -1,3 +1,9 @@
+## [0.9.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.9.0...v0.9.1) (2026-09-01)
+
+### Bug Fixes
+
+* **coerce:** guard the discriminator read, which was the last unguarded line ([#16](https://github.com/sergeyshmakov/runpod-doc-worker/issues/16)) ([994703b](https://github.com/sergeyshmakov/runpod-doc-worker/commit/994703babbb61cd0ed0f51781b070e60119801d9))
+
 ## [0.9.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.8.1...v0.9.0) (2026-09-01)
 
 ### ⚠ BREAKING CHANGES
