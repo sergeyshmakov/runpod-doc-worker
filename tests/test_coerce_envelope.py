@@ -167,6 +167,91 @@ def test_no_rejection_path_stringifies_an_unbounded_integer(call) -> None:
     assert "Exceeds the limit" not in message
 
 
+# -----------------------------------------------------------------------------
+# Subclasses, where isinstance is not enough
+# -----------------------------------------------------------------------------
+#
+# Every guard in this module gates on `isinstance`, and both `int` and `str` can
+# be subclassed with the exact behaviour the guard assumed away. None of these is
+# reachable from a JSON body -- json produces exact `int` and `str` -- but these
+# are public functions in a shared package, so a consumer can hand them anything.
+
+
+class _UnhashableStr(str):
+    """A string that cannot be a set member. `__hash__ = None` is all it takes."""
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+class _HashRaisesStr(str):
+    def __hash__(self) -> int:
+        raise RuntimeError("hash is broken")
+
+
+class _ReprRaisesInt(int):
+    def __repr__(self) -> str:
+        raise RuntimeError("int repr is broken")
+
+
+class _ReprRaisesUnrelatedValueError:
+    def __repr__(self) -> str:
+        raise ValueError("something entirely unrelated to integers")
+
+
+@pytest.mark.parametrize("bad", [_UnhashableStr("nope"), _HashRaisesStr("nope")])
+def test_one_of_rejects_a_string_subclass_that_cannot_be_hashed(bad: str) -> None:
+    """`isinstance(chosen, str)` passing does not make the set lookup safe.
+
+    A `str` subclass may set `__hash__ = None` or raise from it, so the membership
+    test itself throws after the type check has already passed. A membership test
+    that cannot be performed is not a match.
+    """
+    with pytest.raises(ValueError) as caught:
+        coerce.one_of("mode", bad, frozenset({"fast"}), "fast")
+
+    assert str(caught.value).startswith(PREFIX)
+    assert "mode must be one of" in str(caught.value)
+
+
+def test_an_int_subclass_with_a_raising_repr_is_still_described() -> None:
+    """The integer fast path used to sit outside the try, so this escaped.
+
+    `int` is subclassable, so `isinstance(value, int)` is not a promise that
+    `repr(value)` is safe.
+    """
+    with pytest.raises(ValueError) as caught:
+        coerce.bounded_int("n", _ReprRaisesInt(99), low=1, high=10)
+
+    assert str(caught.value).startswith(PREFIX)
+    assert "_ReprRaisesInt" in str(caught.value)
+
+
+def test_an_unrelated_value_error_is_not_blamed_on_an_oversized_integer() -> None:
+    """The attribution has to be narrowed, not assumed.
+
+    CPython raises a plain `ValueError` for the int-to-decimal limit with no
+    distinct type, so the message is the only discriminator. Before narrowing on
+    it, any `ValueError` out of a caller's `__repr__` was reported as "containing
+    an oversized integer" -- of an object that is not a container and holds no
+    integer.
+    """
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", _ReprRaisesUnrelatedValueError())
+
+    message = str(caught.value)
+    assert message.startswith(PREFIX)
+    assert "oversized integer" not in message
+    assert "could not be rendered" in message
+
+
+def test_the_oversized_integer_attribution_survives_the_narrowing() -> None:
+    """The narrowing must not cost the genuine case its specific message."""
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", [10**5000])
+
+    assert "list containing an oversized integer" in str(caught.value)
+
+
 class _ReprRaises:
     """A caller value whose own __repr__ blows up. Not exotic: a pydantic model or
     a numpy array with a broken dtype can do this, and a rejection must not become

@@ -100,25 +100,38 @@ def _describe(value: Any) -> str:
     * **A very long value bloats the response** with content the caller already
       has, and the response has a delivery cap.
     """
-    if isinstance(value, int) and not isinstance(value, bool):
-        if value.bit_length() > _MAX_DESCRIBED_BITS:
-            sign = "negative " if value < 0 else ""
-            return f"a {sign}{_int_digits(value)}-digit integer"
-        return repr(value)
+    # The integer branch is inside the `try` because `int` can be subclassed: an
+    # `int` subclass with a raising `__repr__` passes the isinstance check and then
+    # escapes, which is what happens when the fast path sits outside the guard.
     try:
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value.bit_length() > _MAX_DESCRIBED_BITS:
+                sign = "negative " if value < 0 else ""
+                return f"a {sign}{_int_digits(value)}-digit integer"
+            return repr(value)
         rendered = repr(value)
-    except ValueError:
-        # An oversized integer *nested* inside a container. The guard above only
-        # sees a top-level one, and `repr` recurses -- so `[10**5000]` stringifies
-        # the element and raises the same unprefixed ValueError the guard exists
-        # to prevent. Catching it here covers any depth and any container without
-        # walking the structure, which is what a hand-rolled recursion would get
-        # wrong for the next shape nobody thought of.
-        return f"a {type(value).__name__} containing an oversized integer"
+    except ValueError as e:
+        # The common case is an oversized integer *nested* in a container: the
+        # bit_length guard only sees a top-level one, and `repr` recurses, so
+        # `[10**5000]` stringifies the element and raises the very error this
+        # function exists to prevent. Catching it covers any depth and any
+        # container without walking the structure -- which a hand-rolled recursion
+        # would get wrong for the next shape nobody thought of.
+        #
+        # CPython raises a plain `ValueError` for the int-to-decimal limit with no
+        # distinct type, so its message is the only discriminator available. Narrow
+        # on it rather than assuming: an unrelated `ValueError` out of a caller's
+        # own `__repr__` should not be reported as holding an integer it does not
+        # hold. If CPython ever rewords this, the fallback is the generic message
+        # -- vaguer, but not false, which is the safe direction to be wrong in.
+        if "Exceeds the limit" in str(e):
+            return f"a {type(value).__name__} containing an oversized integer"
+        return f"a {type(value).__name__} that could not be rendered"
     except Exception:  # noqa: BLE001
-        # A caller-supplied object whose own __repr__ raises. Nothing else in this
-        # module would survive it either, and a rejection must not become a crash.
-        return f"a {type(value).__name__}"
+        # A caller-supplied object whose own `__repr__` raises anything else.
+        # Nothing in this module would survive it either, and a rejection must not
+        # become a crash.
+        return f"a {type(value).__name__} that could not be rendered"
     if len(rendered) > _MAX_DESCRIBED_CHARS:
         return rendered[: _MAX_DESCRIBED_CHARS - 3] + "..."
     return rendered
@@ -223,12 +236,24 @@ def one_of(
     to work around it, which was the one thing that did not help.
     """
     chosen = value if value else (default() if callable(default) else default)
-    # The type check comes first and short-circuits, which is the whole point.
+    # The type check comes first and short-circuits, which is most of the point:
     # `allowed` is a set of strings, so a truthy non-string is invalid by
     # definition -- and a list or dict is *unhashable*, so the membership test on
-    # its own raised a bare `TypeError` rather than rejecting. A JSON body can
-    # carry either at any enum-shaped field, which made it a plain route out of
-    # the rejection envelope.
-    if not isinstance(chosen, str) or chosen not in allowed:
+    # its own raised a bare `TypeError` rather than rejecting.
+    #
+    # The isinstance check alone is not enough, though. `str` can be subclassed,
+    # and a subclass may set `__hash__ = None` or raise from it, so a value can
+    # pass as a string and still make the set lookup throw. A membership test that
+    # cannot be performed is not a match -- the same conclusion, reached without
+    # letting the TypeError out.
+    try:
+        acceptable = isinstance(chosen, str) and chosen in allowed
+    except Exception:  # noqa: BLE001
+        # Not just `TypeError`. An unhashable subclass raises that, but one whose
+        # `__hash__` is defined and *raises* propagates whatever it likes -- and a
+        # first pass here caught only TypeError and still let a RuntimeError out.
+        # Whatever the membership test raises, it did not establish a match.
+        acceptable = False
+    if not acceptable:
         fail(f"{field} must be one of {sorted(allowed)}; got {_describe(chosen)}")
     return chosen
