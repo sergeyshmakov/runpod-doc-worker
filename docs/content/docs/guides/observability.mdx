@@ -19,9 +19,11 @@ finally:
     worker_logging.job_id_var.reset(token)
 ```
 
-The default output is one JSON object per line. Set `LOG_FORMAT=text` for compact local output. Set `LOG_LEVEL=debug` to enable calls to `debug()`; this variable does not filter the other levels.
+The default output is one JSON object per line: `ts`, `level`, `logger`, `message`, an optional `job_id`, then the caller's fields. Set `LOG_FORMAT=text` for compact local output. Set `LOG_LEVEL=debug` to enable calls to `debug()`; this variable does not filter the other levels.
 
-The public emitters are `info()`, `warning()`, `error()`, and `debug()`. Caller fields cannot replace `ts`, `level`, `logger`, `msg`, or `job_id`.
+The text is under `message`, matching RunPod's own documented record shape (`{"level": ..., "message": ...}`). Its log viewer reads those names literally, so a record using anything else renders with an empty MESSAGE column — present, valid, and unreadable where it is read.
+
+The public emitters are `info()`, `warning()`, `error()`, and `debug()`. Caller fields cannot replace `ts`, `level`, `logger`, `message`, or `job_id`. They also cannot replace `msg`: that is the parameter name the emitters take the text as, so passing it is a `TypeError` rather than a silently dropped field.
 
 ## Mirror records to another sink
 
