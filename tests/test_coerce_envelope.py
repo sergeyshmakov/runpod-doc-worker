@@ -193,6 +193,53 @@ class _ReprRaisesInt(int):
         raise RuntimeError("int repr is broken")
 
 
+class _StrRaisesValueError(ValueError):
+    """A ValueError whose own __str__ raises. The caller picks the exception type
+    that comes out of its __repr__, so it can pick this one."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("str of the exception is broken too")
+
+
+class _ReprRaisesAnUnreadableError:
+    def __repr__(self) -> str:
+        raise _StrRaisesValueError("x")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda v: coerce.fraction("t", v),
+        lambda v: coerce.positive_number("t", v),
+        lambda v: coerce.bounded_int("n", v, low=1, high=10),
+        lambda v: coerce.one_of("m", v, frozenset({"a"}), "a"),
+    ],
+    ids=["fraction", "positive_number", "bounded_int", "one_of"],
+)
+def test_an_exception_whose_str_also_raises_does_not_escape(call) -> None:
+    """The last layer of this onion: reading the discriminator was unguarded.
+
+    `_describe` narrows its ValueError branch on the exception's message, and that
+    exception came out of a caller's own `__repr__` -- so the caller chose its type.
+    A ValueError subclass whose `__str__` also raises threw that second exception
+    straight out of the handler written to stop exactly this leak.
+    """
+    with pytest.raises(ValueError) as caught:
+        call(_ReprRaisesAnUnreadableError())
+
+    assert str(caught.value).startswith(PREFIX)
+    assert "_ReprRaisesAnUnreadableError" in str(caught.value)
+
+
+def test_an_unreadable_discriminator_falls_back_to_the_vaguer_message() -> None:
+    """Vaguer, not false: it cannot know whether an integer was involved."""
+    with pytest.raises(ValueError) as caught:
+        coerce.fraction("t", _ReprRaisesAnUnreadableError())
+
+    assert "could not be rendered" in str(caught.value)
+    assert "oversized integer" not in str(caught.value)
+
+
 class _ReprRaisesUnrelatedValueError:
     def __repr__(self) -> str:
         raise ValueError("something entirely unrelated to integers")
