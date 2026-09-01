@@ -34,12 +34,57 @@ def test_info_emits_one_line_json(monkeypatch):
     out = _capture(worker_logging.info, "test message", backend="local-engine", pages=10)
     assert out.count("\n") == 1
     data = json.loads(out.strip())
-    assert data["msg"] == "test message"
+    assert data["message"] == "test message"
     assert data["level"] == "info"
     assert data["logger"] == config.active().logger_name
     assert data["backend"] == "local-engine"
     assert data["pages"] == 10
     assert data["ts"].endswith("Z")
+
+
+def test_the_message_key_is_message_not_msg(monkeypatch) -> None:
+    """The field name is a contract with whatever reads these lines.
+
+    RunPod documents a structured record as `{"level": "INFO", "message": "..."}`
+    and its log viewer reads those two names literally: it filled the LEVEL
+    column from `level`, found no message field under the old `msg` spelling,
+    and rendered every structured line with an empty MESSAGE column. Observed on
+    a live endpoint, where the only readable lines in a whole boot sequence were
+    the ones that were never JSON.
+
+    `message` is what the common aggregators index on too, so `msg` was costing
+    legibility in every sink rather than only that viewer.
+
+    Pinned rather than assumed, because nothing else fails when it changes: the
+    records keep being written, keep being valid JSON, and keep being unreadable
+    exactly where they are read. `msg` is asserted absent so the rename cannot
+    half-happen.
+    """
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    record = json.loads(_capture(worker_logging.info, "a message").strip())
+    assert record["message"] == "a message"
+    assert "msg" not in record
+
+
+def test_a_caller_cannot_shadow_the_message(monkeypatch) -> None:
+    """`message` had to join RESERVED_FIELDS when it became the record's key.
+
+    Before the rename nothing stopped a caller passing `message=...`, because it
+    was an ordinary field name. Now it is the field the record is built from, and
+    an unreserved one would sit in the line replacing the text the call actually
+    logged -- a log entry saying something its author never wrote.
+
+    The other spelling needs no guard: the helpers take the text as a parameter
+    named `msg`, so `info("real", msg="forged")` is a TypeError before any of
+    this runs, which is why `msg` is not in the set.
+    """
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    record = json.loads(
+        _capture(worker_logging.info, "the real message", message="forged").strip()
+    )
+    assert record["message"] == "the real message"
+    with pytest.raises(TypeError):
+        worker_logging.info("the real message", msg="forged")
 
 
 def test_warning_and_error_use_correct_levels(monkeypatch):
@@ -76,8 +121,8 @@ def test_flush_happens_per_emission(monkeypatch, capsys):
     captured = capsys.readouterr()
     lines = [ln for ln in captured.out.splitlines() if ln.strip()]
     assert len(lines) == 2
-    assert json.loads(lines[0])["msg"] == "first"
-    assert json.loads(lines[1])["msg"] == "second"
+    assert json.loads(lines[0])["message"] == "first"
+    assert json.loads(lines[1])["message"] == "second"
 
 
 # -----------------------------------------------------------------------------
@@ -276,4 +321,4 @@ def test_json_format_was_already_safe(monkeypatch):
     monkeypatch.setenv("LOG_FORMAT", "json")
     out = _capture(worker_logging.info, "boom\nforged")
     assert len([ln for ln in out.splitlines() if ln.strip()]) == 1
-    assert json.loads(out.strip())["msg"] == "boom\nforged"
+    assert json.loads(out.strip())["message"] == "boom\nforged"
