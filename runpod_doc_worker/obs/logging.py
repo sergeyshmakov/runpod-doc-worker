@@ -8,9 +8,17 @@ only reliable channel — RunPod captures stdout regardless of what any
 logging library does to it (proven by the SDK's own `Started.` /
 `Finished.` lines using the same mechanism).
 
-Output is one JSON object per line by default — easier to filter in
-RunPod's log viewer or any downstream JSON sink. ``LOG_FORMAT=text``
-flips to a human-readable single-line format for local development.
+Output is one JSON object per line by default, for a downstream JSON sink.
+``LOG_FORMAT=text`` flips to a human-readable single-line format.
+
+The text lives under ``message``, not ``msg``. RunPod's documented example of a
+structured record is ``{"level": "INFO", "message": "..."}`` — those two
+names — and its log viewer reads them literally: it filled the LEVEL column
+from ``level``, found no message field under the old spelling, and rendered
+every structured line with an empty MESSAGE column. Observed on a live
+endpoint, where the only readable lines in a whole boot sequence were the
+ones that were never JSON. ``message`` is what the common aggregators index
+on too, so the old name cost legibility in every sink, not only that viewer.
 
 A ``job_id`` ContextVar is auto-injected into every emission, per
 RunPod's write-logs guidance ("Include the job ID or request ID in
@@ -49,7 +57,11 @@ job_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # had to hand, which defeats the correlation the contextvar exists for. They are
 # dropped rather than merged, and identically in both formats: the same call
 # must not mean two different things depending on an env var.
-RESERVED_FIELDS = frozenset({"ts", "level", "logger", "msg", "job_id"})
+# `msg` is deliberately absent: the public helpers take the text as a parameter
+# named `msg`, so `info("real", msg="x")` is a TypeError before any of this
+# runs, and listing it would imply a filter that can never fire. `message` has
+# no such protection and needs the entry — it became the record's own key.
+RESERVED_FIELDS = frozenset({"ts", "level", "logger", "message", "job_id"})
 
 
 def _caller_fields(fields: dict[str, Any]) -> dict[str, Any]:
@@ -72,14 +84,14 @@ def _render(level: str, msg: str, fields: dict[str, Any]) -> str:
 
 
 def _format_json(level: str, msg: str, fields: dict[str, Any]) -> str:
-    """Build a one-line JSON record. Always includes ts, level, logger, msg."""
+    """Build a one-line JSON record. Always ts, level, logger and message."""
     now = time.time()
     ms = int((now - int(now)) * 1000)
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{ms:03d}Z",
         "level": level,
         "logger": _config.active().logger_name,
-        "msg": msg,
+        "message": msg,
     }
     if (jid := job_id_var.get()) is not None:
         record["job_id"] = jid

@@ -219,4 +219,4 @@ def test_the_log_message_is_public_and_is_what_gets_logged(capsys):
     record = json.loads(capsys.readouterr().out.strip())
 
     assert degraded.MESSAGE == "response degraded"
-    assert record["msg"] == degraded.MESSAGE
+    assert record["message"] == degraded.MESSAGE
