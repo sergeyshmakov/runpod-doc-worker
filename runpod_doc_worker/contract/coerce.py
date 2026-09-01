@@ -124,7 +124,16 @@ def _describe(value: Any) -> str:
         # own `__repr__` should not be reported as holding an integer it does not
         # hold. If CPython ever rewords this, the fallback is the generic message
         # -- vaguer, but not false, which is the safe direction to be wrong in.
-        if "Exceeds the limit" in str(e):
+        # `str(e)` is itself guarded. The exception here came out of a caller's
+        # `__repr__`, so the caller chose its type -- and a `ValueError` subclass
+        # whose `__str__` also raises would throw that second exception straight
+        # out of this handler, which is the leak the handler exists to stop. When
+        # the discriminator cannot be read, fall back to the vaguer message.
+        try:
+            oversized = "Exceeds the limit" in str(e)
+        except Exception:  # noqa: BLE001
+            oversized = False
+        if oversized:
             return f"a {type(value).__name__} containing an oversized integer"
         return f"a {type(value).__name__} that could not be rendered"
     except Exception:  # noqa: BLE001
