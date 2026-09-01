@@ -1,3 +1,9 @@
+## [0.8.1](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.8.0...v0.8.1) (2026-09-01)
+
+### Bug Fixes
+
+* **coerce:** close the last two routes out of the rejection envelope ([#14](https://github.com/sergeyshmakov/runpod-doc-worker/issues/14)) ([f236a2a](https://github.com/sergeyshmakov/runpod-doc-worker/commit/f236a2ae39572fa42ab593e27b18c5bd5a654fe9))
+
 ## [0.8.0](https://github.com/sergeyshmakov/runpod-doc-worker/compare/v0.7.2...v0.8.0) (2026-08-31)
 
 ### Features

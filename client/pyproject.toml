@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "runpod-doc-client"
-version = "0.8.0"
+version = "0.8.1"
 description = "Read a runpod-doc-worker response safely: archives, filenames, base64."
 readme = "README.md"
 # 3.10.12, not 3.10: `tarfile`'s `filter="data"` arrived in that patch release and
